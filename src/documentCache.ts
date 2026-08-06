@@ -1,35 +1,48 @@
 import { TextDocument } from "vscode-languageserver-textdocument";
-import { validateDocument } from "./lang/gitlabci";
+import { GitlabService } from "./lang/gitlabci";
 import { ErrorReporter } from "./lang/error-reporter";
 import { GitlabFile } from "./lang/gitlab.model";
+import { ParsedNode } from "yaml";
 
 export interface GitlabCachedDocument {
   version: number;
+  content: ParsedNode | null;
   model: GitlabFile | null;
 }
 
-const cache = new Map<string, GitlabCachedDocument>();
+export class GitlabDocumentCache {
+  private cache = new Map<string, GitlabCachedDocument>();
 
-function ensureCache(document: TextDocument, reporter: ErrorReporter): void {
-  const key = document.uri;
-  if (!cache.has(key)) {
-    cache.set(key, {
-      version: -1,
-      model: new GitlabFile(),
-    });
-  }
-  const cacheEntry = cache.get(key)!!;
-  if (cacheEntry.version !== document.version) {
-    let text = document.getText();
-    cacheEntry.model = validateDocument(text, reporter);
-    cacheEntry.version = document.version;
-  }
-}
+  constructor(private gitlabService: GitlabService) {}
 
-export function getGitlabDocument(
-  document: TextDocument,
-  reporter: ErrorReporter,
-): GitlabFile | null {
-  ensureCache(document, reporter);
-  return cache.get(document.uri)!!.model;
+  private ensureCache(document: TextDocument, reporter: ErrorReporter): void {
+    const key = document.uri;
+    if (!this.cache.has(key)) {
+      this.cache.set(key, {
+        version: -1,
+        content: null,
+        model: new GitlabFile(),
+      });
+    }
+    const cacheEntry = this.cache.get(key)!!;
+    if (cacheEntry.version !== document.version) {
+      let text = document.getText();
+      cacheEntry.content = this.gitlabService.parseDocument(text, reporter);
+      if (cacheEntry.content) {
+        cacheEntry.model = this.gitlabService.validateDocument(
+          cacheEntry.content,
+          reporter,
+        );
+      }
+      cacheEntry.version = document.version;
+    }
+  }
+
+  get(
+    document: TextDocument,
+    reporter: ErrorReporter,
+  ): GitlabCachedDocument | null {
+    this.ensureCache(document, reporter);
+    return this.cache.get(document.uri)!!;
+  }
 }

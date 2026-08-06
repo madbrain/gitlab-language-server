@@ -1,11 +1,26 @@
-import { isScalar, isSeq, Pair, ParsedNode } from "yaml";
+import {
+  CST,
+  isMap,
+  isScalar,
+  isSeq,
+  Pair,
+  ParsedNode,
+  Scalar,
+  YAMLMap,
+} from "yaml";
 import { ErrorReporter } from "./error-reporter";
 import { makeRange } from "./gitlab-builder";
-import { ListNode, Range, ScalarNode } from "./generic-model";
+import { ListNode, MapItem, Range, ScalarNode } from "./generic-model";
 
 export interface ListBuilder {
   minItems(count: number): ListBuilder;
-  ofString(): ListNode;
+  ofString(): MapItem<ListNode>;
+}
+
+export interface MapBuilder {
+  ofItemString<T>(
+    fn: (name: ScalarNode, value: ScalarNode) => T,
+  ): MapItem<T[]> | null;
 }
 
 export class Builder implements ListBuilder {
@@ -13,12 +28,19 @@ export class Builder implements ListBuilder {
   private defaultReportRange!: Range;
   private node: ParsedNode | null = null;
   private items: ParsedNode[] = [];
+  private separatorOffset!: number;
+  private keyNode!: ScalarNode;
 
   constructor(private reporter: ErrorReporter) {}
 
   fromItem(item: Pair<ParsedNode, ParsedNode | null>) {
     this.defaultReportRange = makeRange(item.key);
     this.node = item.value;
+    this.separatorOffset = findMapItemSeparator(item.srcToken!!.sep)!;
+    this.keyNode = new ScalarNode(
+      makeRange(item.key),
+      (item.key as Scalar).value as string,
+    );
     return this;
   }
 
@@ -30,13 +52,17 @@ export class Builder implements ListBuilder {
     return this;
   }
 
-  single(): ScalarNode | null {
+  single(): MapItem<ScalarNode> | null {
     if (!this.hasError) {
       if (!isScalar(this.node)) {
         this.reporter.reportError(this.defaultReportRange, "expecting a list");
         this.hasError = true;
       } else {
-        return new ScalarNode(makeRange(this.node), this.node.value as string);
+        return new MapItem(
+          this.keyNode,
+          this.separatorOffset,
+          new ScalarNode(makeRange(this.node), this.node.value as string),
+        );
       }
     }
     return null;
@@ -76,7 +102,7 @@ export class Builder implements ListBuilder {
     return this;
   }
 
-  ofString(): ListNode {
+  ofString(): MapItem<ListNode> {
     const elements: ScalarNode[] = [];
     this.items.forEach((item) => {
       if (isScalar(item)) {
@@ -85,6 +111,45 @@ export class Builder implements ListBuilder {
         this.reporter.reportError(makeRange(item), "expecting a scalar");
       }
     });
-    return new ListNode(makeRange(this.node!!), elements);
+    return new MapItem(
+      this.keyNode,
+      this.separatorOffset,
+      new ListNode(makeRange(this.node!!), elements),
+    );
   }
+
+  map(): MapBuilder {
+    if (!this.hasError) {
+      if (!isMap(this.node)) {
+        this.reporter.reportError(this.defaultReportRange, "expecting a map");
+        this.hasError = true;
+      }
+    }
+    return this;
+  }
+
+  ofItemString<T>(
+    fn: (name: ScalarNode, value: ScalarNode) => T,
+  ): MapItem<T[]> | null {
+    const m = this.node as YAMLMap<ParsedNode, ParsedNode | null>;
+    const elements: T[] = [];
+    m.items.forEach((item) => {
+      if (isScalar(item.key) && isScalar(item.value)) {
+        elements.push(
+          fn(
+            new ScalarNode(makeRange(item.key), item.key.value as string),
+            new ScalarNode(makeRange(item.value), item.value.value as string),
+          ),
+        );
+      }
+    });
+    return new MapItem(this.keyNode, this.separatorOffset, elements);
+  }
+}
+
+export function findMapItemSeparator(sep: CST.SourceToken[] | undefined) {
+  if (sep) {
+    return sep.find((t) => t.type === "map-value-ind")?.offset;
+  }
+  return undefined;
 }

@@ -1,12 +1,51 @@
-import { isMap, isScalar, Pair, ParsedNode } from "yaml";
+import {
+  isAlias,
+  isMap,
+  isScalar,
+  isSeq,
+  Pair,
+  ParsedNode,
+  Scalar,
+} from "yaml";
 import { ErrorReporter } from "./error-reporter";
-import { GitlabFile, Include, Job } from "./gitlab.model";
-import { Range, ScalarNode } from "./generic-model";
-import { Builder } from "./generic-builder";
+import {
+  GitlabFile,
+  Include,
+  InputArgument,
+  Job,
+  Rule,
+  VariableDefinition,
+  Workflow,
+} from "./gitlab.model";
+import { MapItem, Range, ScalarNode } from "./generic-model";
+import { Builder, findMapItemSeparator } from "./generic-builder";
 
 export class GitlabFileBuilder {
+  private anchors = new Map<string, ParsedNode>();
+
   constructor(private reporter: ErrorReporter) {}
+
+  private collectAnchors(node: ParsedNode) {
+    if (node.anchor) {
+      this.anchors.set(node.anchor, node);
+    }
+    if (isMap(node)) {
+      node.items.forEach((item) => {
+        if (item.value) {
+          this.collectAnchors(item.value);
+        }
+      });
+    } else if (isSeq(node)) {
+      node.items.forEach((item) => {
+        this.collectAnchors(item);
+      });
+    }
+  }
+
   parseGitlabFile(node: ParsedNode): GitlabFile | null {
+    // TODO use node.resolved(doc) instead of collecting anchors
+    this.collectAnchors(node);
+
     if (!isMap(node)) {
       this.reporter.reportError(makeRange(node), "expecting a map");
       return null;
@@ -19,6 +58,7 @@ export class GitlabFileBuilder {
       }
       const fieldName = item.key.value as string;
       const nameNode = new ScalarNode(makeRange(item.key), fieldName);
+      const separator = findMapItemSeparator(item.srcToken!.sep)!;
 
       const DEPRECATED_MOVE_TO_DEFAULT = [
         "image",
@@ -27,7 +67,7 @@ export class GitlabFileBuilder {
         "after_script",
         "cache",
       ];
-      const DEPRECATED = ["!reference", "pages"];
+      const DEPRECATED = ["pages"];
 
       if (fieldName === "stages") {
         gitlabFile.stages = new Builder(this.reporter)
@@ -39,18 +79,45 @@ export class GitlabFileBuilder {
       } else if (fieldName === "default") {
         this.reporter.reportWarning(makeRange(item.key), "TODO");
       } else if (fieldName === "include") {
+        const includes = [];
         if (!item.value) {
           this.reporter.reportError(makeRange(item.key), "expecting a value");
-        } else {
-          const include = this.parseInclude(nameNode, item.value);
+        } else if (isScalar(item.value)) {
+          const value = new ScalarNode(
+            makeRange(item.value),
+            item.value.value as string,
+          );
+
+          // TODO could also be remote depending on the URL
+          const include = new Include();
+          include.local = new MapItem(nameNode, separator, value);
+          includes.push(include);
+        } else if (isMap(item.value)) {
+          const include = this.parseInclude(item.value);
           if (include) {
-            gitlabFile.includes.push(include);
+            includes.push(include);
           }
+        } else if (isSeq(item.value)) {
+          item.value.items.forEach((item) => {
+            const include = this.parseInclude(item);
+            if (include) {
+              includes.push(include);
+            }
+          });
+        } else {
+          this.reporter.reportError(
+            makeRange(item.key),
+            "expecting a map or list",
+          );
         }
+        gitlabFile.include = new MapItem(nameNode, separator, includes);
       } else if (fieldName === "variables") {
-        this.reporter.reportWarning(makeRange(item.key), "TODO");
+        gitlabFile.variables = new Builder(this.reporter)
+          .fromItem(item)
+          .map()
+          .ofItemString((name, value) => new VariableDefinition(name, value));
       } else if (fieldName === "workflow") {
-        this.reporter.reportWarning(makeRange(item.key), "TODO");
+        gitlabFile.workflow = this.parseWorkflow(item);
       } else if (DEPRECATED_MOVE_TO_DEFAULT.includes(fieldName)) {
         this.reporter.reportError(
           makeRange(item.key),
@@ -61,14 +128,14 @@ export class GitlabFileBuilder {
       } else {
         if (fieldName.startsWith(".")) {
           // TODO delay analysis until we known its usage
-          this.reporter.reportWarning(makeRange(item.key), "TODO template");
+          // TODO store them for later analysis
         } else {
           if (!item.value) {
             this.reporter.reportError(makeRange(item.key), "expecting a value");
           } else {
             const job = this.parseJob(nameNode, item.value);
             if (job) {
-              gitlabFile.jobs.push(job);
+              gitlabFile.addJob(new MapItem(nameNode, separator, job));
             }
           }
         }
@@ -77,32 +144,187 @@ export class GitlabFileBuilder {
     return gitlabFile;
   }
 
-  private parseInclude(nameNode: ScalarNode, node: ParsedNode) {
+  parseWorkflow(
+    item: Pair<ParsedNode, ParsedNode | null>,
+  ): MapItem<Workflow> | null {
+    if (!item.value) {
+      this.reporter.reportError(makeRange(item.key), "expecting a value");
+      return null;
+    }
+    if (!isMap(item.value)) {
+      this.reporter.reportError(makeRange(item.value), "expecting a map");
+      return null;
+    }
+    const workflow = new Workflow();
+    item.value.items.forEach((item) => {
+      if (!isScalar(item.key)) {
+        this.reporter.reportError(
+          makeRange(item.key),
+          "expecting a scalar key",
+        );
+        return;
+      }
+      const fieldName = item.key.value as string;
+      const keyNode = new ScalarNode(makeRange(item.key), fieldName);
+      const separator = findMapItemSeparator(item.srcToken!.sep)!;
+      if (fieldName === "name") {
+        workflow.name = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .single();
+      } else if (fieldName === "rules") {
+        workflow.rules = this.parseRules(keyNode, separator, item.value);
+      } else {
+        this.reporter.reportWarning(
+          makeRange(item.key),
+          `TODO workflow::${fieldName}`,
+        );
+      }
+    });
+    return new MapItem(
+      new ScalarNode(makeRange(item.key), (item.key as Scalar).value as string),
+      findMapItemSeparator(item.srcToken?.sep)!,
+      workflow,
+    );
+  }
+
+  private parseInclude(node: ParsedNode) {
     if (!isMap(node)) {
       this.reporter.reportError(makeRange(node), "expecting a map");
       return null;
     }
-    const include = new Include(nameNode);
+    const include = new Include();
     node.items.forEach((item) => {
       if (!isScalar(item.key)) {
         this.reporter.reportError(makeRange(item.key), "expecting scalar key");
         return;
       }
       const fieldName = item.key.value as string;
-      if (fieldName === "local") {
+      const keyNode = new ScalarNode(makeRange(item.key), fieldName);
+      const separator = findMapItemSeparator(item.srcToken!.sep)!;
+      if (fieldName === "component") {
+        include.component = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .single();
+      } else if (fieldName === "local") {
         // TODO also default value when include is single
         include.local = new Builder(this.reporter)
           .fromItem(item)
           .required()
           .single();
+      } else if (fieldName === "project") {
+        include.project = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .single();
+      } else if (fieldName === "file") {
+        include.file = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .singleToList()
+          .ofString();
+      } else if (fieldName === "ref") {
+        include.ref = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .single();
+      } else if (fieldName === "remote") {
+        include.remote = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .single();
+      } else if (fieldName === "template") {
+        include.template = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .single();
+      } else if (fieldName === "inputs") {
+        include.inputs = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .map()
+          .ofItemString((name, value) => new InputArgument(name, value));
+      } else if (fieldName === "rules") {
+        include.rules = this.parseRules(keyNode, separator, item.value);
       } else {
         this.reporter.reportError(
           makeRange(item.key),
-          `TODO job::${fieldName}`,
+          `TODO include::${fieldName}`,
         );
       }
     });
     return include;
+  }
+
+  private parseRules(
+    keyNode: ScalarNode,
+    separator: number,
+    value: ParsedNode | null,
+  ): MapItem<Rule[]> | null {
+    if (!value) {
+      this.reporter.reportError(keyNode.range, "expecting a value");
+      return null;
+    }
+    if (!isSeq(value)) {
+      this.reporter.reportError(makeRange(value), "expecting a list");
+      return null;
+    }
+    const result: Rule[] = [];
+    value.items.forEach((item) => {
+      const rule = this.parseRule(item);
+      if (rule) {
+        result.push(rule);
+      }
+    });
+    return new MapItem(keyNode, separator, result);
+  }
+
+  private parseRule(node: ParsedNode): Rule | null {
+    if (isAlias(node)) {
+      const aliasedNode = this.anchors.get(node.source);
+      if (!aliasedNode) {
+        this.reporter.reportError(makeRange(node), `unknown anchor`);
+        return null;
+      }
+      // TODO interpret aliasedNode as rule
+      return null;
+    }
+    if (!isMap(node)) {
+      this.reporter.reportError(makeRange(node), "expecting a map");
+      return null;
+    }
+    const rule = new Rule();
+    node.items.forEach((item) => {
+      if (!isScalar(item.key)) {
+        this.reporter.reportError(makeRange(item.key), "expecting scalar key");
+        return;
+      }
+      const fieldName = item.key.value as string;
+      if (fieldName === "if") {
+        rule.if = new Builder(this.reporter).fromItem(item).required().single();
+      } else if (fieldName === "changes") {
+        this.reporter.reportWarning(makeRange(item.key), "TODO");
+      } else if (fieldName === "exists") {
+        this.reporter.reportWarning(makeRange(item.key), "TODO");
+      } else if (fieldName === "when") {
+        rule.when = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .single();
+      } else if (fieldName === "variables") {
+        rule.variables = new Builder(this.reporter)
+          .fromItem(item)
+          .map()
+          .ofItemString((name, value) => new VariableDefinition(name, value));
+      } else {
+        this.reporter.reportWarning(
+          makeRange(item.key),
+          `TODO Rule::${fieldName}`,
+        );
+      }
+    });
+    return rule;
   }
 
   private parseJob(nameNode: ScalarNode, node: ParsedNode): Job | null {
@@ -135,6 +357,16 @@ export class GitlabFileBuilder {
           .ofString();
       } else if (fieldName === "needs") {
         job.needs = new Builder(this.reporter).fromItem(item).list().ofString();
+      } else if (fieldName === "dependencies") {
+        job.dependencies = new Builder(this.reporter)
+          .fromItem(item)
+          .list()
+          .ofString();
+      } else if (fieldName === "variables") {
+        job.variables = new Builder(this.reporter)
+          .fromItem(item)
+          .map()
+          .ofItemString((name, value) => new VariableDefinition(name, value));
       } else {
         this.reporter.reportError(
           makeRange(item.key),
