@@ -10,7 +10,7 @@ export type PathElement =
   | { type: "field"; name: string }
   | { type: "item"; index: number };
 
-export interface completionPosition {
+export interface CompletionPosition {
   type:
     | "complete-in-scalar"
     | "complete-in-key"
@@ -38,7 +38,7 @@ export class CompletionPositioner {
     path: PathElement[],
     minOffset: number,
     maxOffset: number,
-  ): completionPosition | null {
+  ): CompletionPosition | null {
     if (isScalar(node)) {
       const endPosition = this.textDocument.toPosition(node.range[1]);
       const endLine = endPosition.line;

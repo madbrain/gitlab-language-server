@@ -1,15 +1,45 @@
-import { ErrorReporter } from "./error-reporter";
-import { GitlabFile, Job, Rule, VariableDefinition } from "./gitlab.model";
+import { ErrorReporter, NullReporter } from "./error-reporter";
+import {
+  ComponentSpec,
+  GitlabFile,
+  Include,
+  Job,
+  Rule,
+  VariableDefinition,
+} from "./gitlab.model";
 import { MapItem, ScalarNode } from "./generic-model";
+import { GitlabService, LocalFile } from "./gitlabci";
+import { ParsedNode } from "yaml";
+import { ParsedGitlabFile } from "./gitlab-builder";
 
-class GitlabFileContext {
+export class GitlabFileContext {
   stages = DEFAULT_STAGES;
   stageByName: Map<string, StageDefinition> = new Map(
     DEFAULT_STAGES.map((n) => [n, new StageDefinition(n)]),
   );
   jobs = new Map<string, Job>();
+  includedContexts: GitlabFileContext[] = [];
 
-  constructor(public mainFile: GitlabFile) {}
+  constructor(
+    public uri: string,
+    public root: ParsedNode | null,
+    public mainFile: GitlabFile,
+    public spec: ComponentSpec | null = null,
+  ) {}
+
+  findJob(name: string): Job | null {
+    const job = this.jobs.get(name);
+    if (job) {
+      return job;
+    }
+    for (const includedContext of this.includedContexts.reverse()) {
+      const job = includedContext.findJob(name);
+      if (job) {
+        return job;
+      }
+    }
+    return null;
+  }
 
   addStage(stage: ScalarNode) {
     this.stages.push(stage.value);
@@ -31,24 +61,31 @@ class StageDefinition {
 }
 
 export interface IncludeResolver {
-  findComponentFile(componentPath: string): GitlabFile | null;
+  findComponentFile(componentPath: string): Promise<LocalFile | null>;
   findProjectFile(
     projectPath: string,
     value: string,
     ref: string | null,
-  ): GitlabFile | null;
+  ): Promise<LocalFile | null>;
 }
 
 export class GitlabFileValidator {
   constructor(
     private reporter: ErrorReporter,
     private includeResolver: IncludeResolver,
+    private gitlabService: GitlabService,
   ) {}
 
-  validate(file: GitlabFile) {
-    const context = new GitlabFileContext(file);
+  async validate(parsedFile: ParsedGitlabFile, spec: ComponentSpec | null) {
+    const file = parsedFile.file;
+    const context = new GitlabFileContext(
+      parsedFile.uri,
+      parsedFile.root,
+      file,
+      spec,
+    );
     this.validateVariables(file.variables?.value ?? null);
-    this.validateIncludes(file, context);
+    await this.validateIncludes(file, context);
     this.validateWorkflow(file);
     this.validateStages(file, context);
     this.validateJobs(file, context);
@@ -72,7 +109,7 @@ export class GitlabFileValidator {
       context.stageByName = new Map();
       file.stages.value.elements.forEach((v) => {
         if (context.stageByName.has(v.value)) {
-          this.reporter.reportError(v.range, "already defined stage");
+          this.reporter.reportError(v.range, "duplicated stage");
         } else {
           context.addStage(v);
         }
@@ -114,67 +151,173 @@ export class GitlabFileValidator {
     return true;
   }
 
-  private validateIncludes(file: GitlabFile, context: GitlabFileContext) {
-    if (file.include) {
-      file.include.value.forEach((include) => {
-        const oneOfKeys = [
-          "component",
-          "local",
-          "project",
-          "remote",
-          "template",
-        ];
-        if (this.checkOneOf(oneOfKeys, include)) {
-          if (include.project) {
-            if (!include.file) {
-              this.reporter.reportError(
-                include.project.keyNode.range,
-                "file property must be defined",
-              );
-            } else {
-              const projectPath = include.project.value.value;
-              const ref = include.ref?.value.value ?? null;
-              include.file.value.elements.forEach((file) => {
-                const includedFile = this.includeResolver.findProjectFile(
-                  projectPath,
-                  file.value,
-                  ref,
-                );
-                this.reporter.reportWarning(
-                  file.range,
-                  `TODO include::project(${projectPath} / ${file.value} / ${ref}) -> ${includedFile}`,
-                );
-              });
+  private async validateIncludes(file: GitlabFile, context: GitlabFileContext) {
+    if (!file.include) {
+      return;
+    }
+    for (const include of file.include.value) {
+      await this.validateInclude(include, context);
+    }
+  }
+
+  private async validateInclude(include: Include, context: GitlabFileContext) {
+    const oneOfKeys = ["component", "local", "project", "remote", "template"];
+    if (this.checkOneOf(oneOfKeys, include)) {
+      if (include.project) {
+        await this.validateIncludeProject(include, include.project, context);
+      } else if (include.component) {
+        await this.validateIncludeComponent(
+          include,
+          include.component,
+          context,
+        );
+      } else if (include.local) {
+        this.reporter.reportWarning(
+          include.local.keyNode.range,
+          "TODO include::local",
+        );
+      } else if (include.remote) {
+        this.reporter.reportWarning(
+          include.remote.keyNode.range,
+          "TODO include::remote",
+        );
+      } else if (include.template) {
+        this.reporter.reportWarning(
+          include.template.keyNode.range,
+          "TODO include::template",
+        );
+      }
+    }
+    if (include.rules) {
+      this.validateRules(include.rules.value);
+    }
+  }
+
+  private async validateIncludeProject(
+    include: Include,
+    project: MapItem<ScalarNode>,
+    context: GitlabFileContext,
+  ) {
+    if (!include.file) {
+      this.reporter.reportError(
+        project.keyNode.range,
+        "file property must be defined",
+      );
+      return;
+    }
+    const projectPath = project.value.value;
+    const ref = include.ref?.value.value ?? null;
+    for (const file of include.file.value.elements) {
+      const includedFile = await this.includeResolver.findProjectFile(
+        projectPath,
+        file.value,
+        ref,
+      );
+      if (!includedFile) {
+        // TODO add more info on why it cannot be resolved
+        this.reporter.reportWarning(file.range, `cannot resolve include`);
+      } else {
+        const includedGitlabFile = await this.gitlabService.validateDocument(
+          "file:" + includedFile.path,
+          includedFile.content,
+          NullReporter,
+        );
+        if (!includedGitlabFile) {
+          this.reporter.reportWarning(
+            file.range,
+            `file is not a valid yaml file`,
+          );
+        } else {
+          context.includedContexts.push(includedGitlabFile);
+        }
+      }
+    }
+  }
+
+  private async validateIncludeComponent(
+    include: Include,
+    component: MapItem<ScalarNode>,
+    context: GitlabFileContext,
+  ) {
+    const componentPath = component.value.value!;
+    const includedFile =
+      await this.includeResolver.findComponentFile(componentPath);
+    if (!includedFile) {
+      // TODO add more info on why it cannot be resolved
+      this.reporter.reportWarning(
+        component.value.range,
+        `cannot resolve include`,
+      );
+    } else {
+      const includedGitlabFile = await this.gitlabService.validateDocument(
+        "file:" + includedFile.path,
+        includedFile.content,
+        NullReporter,
+      );
+      if (!includedGitlabFile || !includedGitlabFile.spec) {
+        this.reporter.reportWarning(
+          component.value.range,
+          `file is not a valid component file`,
+        );
+      } else {
+        const inputs = include.inputs;
+        if (inputs) {
+          const args: { [name: string]: string } = {};
+          const spec = includedGitlabFile.spec;
+          spec.inputs.forEach((is) => {
+            if (is.value.default) {
+              args[is.keyNode.value] = is.value.default.value.value;
             }
-          } else if (include.component) {
-            const componentPath = include.component.value.value!;
-            const includedFile =
-              this.includeResolver.findComponentFile(componentPath);
+          });
+          inputs.value.forEach((input) => {
+            const inputSpec = spec.findInput(input.name.value);
+            if (!inputSpec) {
+              this.reporter.reportError(input.name.range, `unknown input`);
+            } else {
+              if (inputSpec.value.type) {
+                this.reporter.reportWarning(
+                  input.value.range,
+                  `TODO check type is ${inputSpec.value.type.value.value})`,
+                );
+              }
+              if (inputSpec.value.regex) {
+                this.reporter.reportWarning(
+                  input.value.range,
+                  `TODO check type is ${inputSpec.value.regex.value.value})`,
+                );
+              }
+              if (inputSpec.value.option) {
+                const possibleOptions =
+                  inputSpec.value.option.value.elements.map((v) => v.value);
+                if (!possibleOptions.includes(input.value.value)) {
+                  this.reporter.reportWarning(
+                    input.value.range,
+                    `unexpected value, possible options: ${possibleOptions.join(", ")})`,
+                  );
+                }
+              }
+              args[input.name.value] = input.value.value;
+            }
+          });
+          const missingRequiredArgs = spec.inputs
+            .filter((is) => args[is.keyNode.value] === undefined)
+            .map((is) => is.keyNode.value);
+
+          if (missingRequiredArgs.length > 0) {
             this.reporter.reportWarning(
-              include.component.keyNode.range,
-              `TODO include::component(${componentPath}) -> ${includedFile}`,
+              inputs.keyNode.range,
+              `missing required inputs: ${missingRequiredArgs.join(", ")}`,
             );
-          } else if (include.local) {
+          } else {
+            // TODO evaluate component with args
+            // TODO add evaluated file to context context.includedContexts.push(includedGitlabFile);
             this.reporter.reportWarning(
-              include.local.keyNode.range,
-              "TODO include::local",
-            );
-          } else if (include.remote) {
-            this.reporter.reportWarning(
-              include.remote.keyNode.range,
-              "TODO include::remote",
-            );
-          } else if (include.template) {
-            this.reporter.reportWarning(
-              include.template.keyNode.range,
-              "TODO include::template",
+              component.value.range,
+              `TODO include::component(${includedFile.path})`,
             );
           }
         }
-        if (include.rules) {
-          this.validateRules(include.rules.value);
-        }
-      });
+      }
     }
   }
 
@@ -219,9 +362,9 @@ export class GitlabFileValidator {
   }
 
   private validateJob(job: Job, context: GitlabFileContext) {
+    this.validateJobExtends(job, context);
     this.validateVariables(job.variables?.value ?? null);
     this.validateJobStage(job, context);
-    this.validateJobExtends(job, context);
     this.validateNeeds(job, context);
     this.validateDependencies(job, context);
   }
@@ -244,24 +387,28 @@ export class GitlabFileValidator {
   private validateJobExtends(job: Job, context: GitlabFileContext) {
     if (job.extends) {
       job.extends.value.elements.forEach((ext) => {
-        if (!context.jobs.has(ext.value)) {
+        const otherJob = context.findJob(ext.value);
+        if (!otherJob) {
           this.reporter.reportError(ext.range, "unknown job");
-        }
-        if (ext.value === job.name.value) {
+        } else if (otherJob === job) {
           this.reporter.reportError(ext.range, "job cannot extends itself");
+        } else {
+          job.extenders.push(otherJob);
         }
       });
     }
   }
 
   private validateNeeds(job: Job, context: GitlabFileContext) {
-    job.needs?.value.elements.forEach((neededJob) => {
-      if (!context.jobs.has(neededJob.value)) {
-        this.reporter.reportError(neededJob.range, "unknown job");
+    job.needs?.value.forEach((neededJob) => {
+      const neededJobName = neededJob.job.value;
+      const otherJob = context.findJob(neededJobName.value);
+      if (!otherJob) {
+        this.reporter.reportError(neededJobName.range, "unknown job");
       }
-      if (neededJob.value === job.name.value) {
+      if (neededJobName.value === job.name.value) {
         this.reporter.reportError(
-          neededJob.range,
+          neededJobName.range,
           "job cannot depend on itself",
         );
       }
@@ -270,25 +417,26 @@ export class GitlabFileValidator {
 
   private validateDependencies(job: Job, context: GitlabFileContext) {
     job.dependencies?.value.elements.forEach((dependentJobName) => {
-      if (!context.jobs.has(dependentJobName.value)) {
+      const dependentJob = context.findJob(dependentJobName.value);
+      if (!dependentJob) {
         this.reporter.reportError(dependentJobName.range, "unknown job");
+      } else {
+        const firstStage = dependentJob.stage?.value.value; // TODO should use method stageName() to handle default
+        const secondStage = job.stage?.value.value;
+        if (firstStage && secondStage) {
+          if (!context.isStageBefore(firstStage, secondStage)) {
+            this.reporter.reportError(
+              dependentJobName.range,
+              "cannot depend on a job whose stage is not before",
+            );
+          }
+        }
       }
       if (dependentJobName.value === job.name.value) {
         this.reporter.reportError(
           dependentJobName.range,
           "job cannot depend on itself",
         );
-      }
-      const dependentJob = context.jobs.get(dependentJobName.value)!;
-      const firstStage = dependentJob.stage?.value.value; // TODO should use method stageName() to handle default
-      const secondStage = job.stage?.value.value;
-      if (firstStage && secondStage) {
-        if (!context.isStageBefore(firstStage, secondStage)) {
-          this.reporter.reportError(
-            dependentJobName.range,
-            "cannot depend on a job whose stage is not before",
-          );
-        }
       }
     });
     if (job.dependencies && job.needs) {

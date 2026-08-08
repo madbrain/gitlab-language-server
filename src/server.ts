@@ -11,7 +11,7 @@ import {
   Diagnostic,
   Range,
   DiagnosticSeverity,
-  CompletionList,
+  Location,
   CompletionItem,
 } from "vscode-languageserver";
 import { TextDocument } from "vscode-languageserver-textdocument";
@@ -36,9 +36,10 @@ const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
 documents.listen(connection);
 
-const includeResolver = new DefaultIncludeResolver({
+const logConsole = {
   log: (msg: string) => connection.console.log(msg),
-});
+};
+const includeResolver = new DefaultIncludeResolver(logConsole);
 const gitlabService = new GitlabService(includeResolver);
 const gitlabDocumentCache = new GitlabDocumentCache(gitlabService);
 const validationDebouncer = new ValidationDebouncer(500, validateTextDocument);
@@ -53,6 +54,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
       completionProvider: {},
+      definitionProvider: {},
       workspace: {
         workspaceFolders: {
           supported: true,
@@ -72,21 +74,37 @@ connection.onInitialized(() => {
   });
 });
 
-connection.onCompletion((params) => {
+function adaptDocument(document: TextDocument) {
+  return {
+    uri: document.uri,
+    makeRange: (range: InternalRange) => {
+      return {
+        start: document.positionAt(range.start),
+        end: document.positionAt(range.start),
+      };
+    },
+  };
+}
+
+connection.onCompletion(async (params) => {
   const document = documents.get(params.textDocument.uri);
   const items: CompletionItem[] = [];
   if (document) {
     const position = document.offsetAt(params.position);
-    const cachedEntry = gitlabDocumentCache.get(document, NullReporter);
+    const cachedEntry = await gitlabDocumentCache.get(document, NullReporter);
     if (cachedEntry && cachedEntry.content && cachedEntry.model) {
-      const completionPosition = new CompletionPositioner(
+      const documentPosition = new CompletionPositioner(
         new GenericTextDocument(document.getText()),
       ).findAtPosition(cachedEntry.content, position);
-      if (completionPosition) {
+      if (documentPosition) {
+        connection.console.log(
+          `COMPLETE AT ${JSON.stringify(documentPosition)}`,
+        );
         items.push(
-          ...cachedEntry.model.completeAt({
-            file: cachedEntry.model,
-            position: completionPosition,
+          ...cachedEntry.model.mainFile.completeAt({
+            document: adaptDocument(document),
+            context: cachedEntry.model,
+            position: documentPosition,
           }),
         );
       }
@@ -95,7 +113,34 @@ connection.onCompletion((params) => {
   return { isIncomplete: false, items };
 });
 
-function validateTextDocument(textDocument: TextDocument) {
+connection.onDefinition(async (params) => {
+  const document = documents.get(params.textDocument.uri);
+  const locations: Location[] = [];
+  if (document) {
+    const position = document.offsetAt(params.position);
+    const cachedEntry = await gitlabDocumentCache.get(document, NullReporter);
+    if (cachedEntry && cachedEntry.content && cachedEntry.model) {
+      const documentPosition = new CompletionPositioner(
+        new GenericTextDocument(document.getText()),
+      ).findAtPosition(cachedEntry.content, position);
+      if (documentPosition) {
+        connection.console.log(
+          `GOTO DEFINITION ${JSON.stringify(documentPosition)}`,
+        );
+        locations.push(
+          ...cachedEntry.model.mainFile.gotoDefinitionAt({
+            document: adaptDocument(document),
+            context: cachedEntry.model,
+            position: documentPosition,
+          }),
+        );
+      }
+    }
+  }
+  return locations;
+});
+
+async function validateTextDocument(textDocument: TextDocument) {
   if (!textDocument) {
     return;
   }
@@ -135,7 +180,9 @@ function validateTextDocument(textDocument: TextDocument) {
 
   connection.console.info(`validate ${textDocument.uri}`);
 
-  const gitlabDocument = gitlabDocumentCache.get(textDocument, reporter)?.model;
+  const gitlabFileContext = (
+    await gitlabDocumentCache.get(textDocument, reporter)
+  )?.model;
 
   connection.sendDiagnostics({
     uri: textDocument.uri,

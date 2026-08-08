@@ -4,6 +4,7 @@ import { GenericTextDocument } from "./text-document";
 import { DefaultIncludeResolver, GitlabService } from "./gitlabci";
 import { CompletionPositioner } from "./completion-positioner";
 import { CompletionItem } from "vscode-languageserver";
+import { TextDocument } from "vscode-languageserver-textdocument";
 
 function code(text: string) {
   const offset = text.indexOf("@");
@@ -13,31 +14,40 @@ function code(text: string) {
   };
 }
 
-function testComplete(content: string, expectedCompletions: CompletionItem[]) {
-  const { text, offset } = code(content);
+async function testComplete(
+  content: string,
+  expectedCompletions: CompletionItem[],
+) {
+  const logConsole = { log: console.log };
   const reporter = new ConsoleErrorReporter();
-  const includeResolver = new DefaultIncludeResolver();
+  const includeResolver = new DefaultIncludeResolver(logConsole);
+  includeResolver.setWorkspaces(["./test"]);
   const gitlabService = new GitlabService(includeResolver);
-  const textDocument = new GenericTextDocument(text);
 
-  const root = gitlabService.parseDocument(text, reporter);
-  expect(root).is.not.null;
-  if (root) {
-    const completionPosition = new CompletionPositioner(
-      textDocument,
-    ).findAtPosition(root, offset);
-    const gitlabFile = gitlabService.validateDocument(root, reporter);
-    expect(reporter.hasError()).is.false;
-    if (gitlabFile && completionPosition) {
-      expect(
-        gitlabFile.completeAt({
-          file: gitlabFile,
-          position: completionPosition,
-        }),
-      ).is.toEqual(expectedCompletions);
-    } else {
-      expect(false, "error while building");
-    }
+  const { text, offset } = code(content);
+
+  const gitlabFileContext = await gitlabService.validateDocument(
+    "file:test.yml",
+    text,
+    reporter,
+  );
+  expect(gitlabFileContext).is.not.null;
+  expect(gitlabFileContext?.root).is.not.null;
+
+  const textDocument = new GenericTextDocument(text);
+  const completionPosition = new CompletionPositioner(
+    textDocument,
+  ).findAtPosition(gitlabFileContext?.root!, offset);
+
+  if (gitlabFileContext && completionPosition) {
+    const completions = gitlabFileContext.mainFile.completeAt({
+      document: {} as TextDocument,
+      context: gitlabFileContext,
+      position: completionPosition,
+    });
+    expect(completions).is.toEqual(expectedCompletions);
+  } else {
+    expect(false, "error while building");
   }
 }
 

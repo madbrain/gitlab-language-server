@@ -30,6 +30,7 @@ export class Builder implements ListBuilder {
   private items: ParsedNode[] = [];
   private separatorOffset!: number;
   private keyNode!: ScalarNode;
+  private isRequired = false;
 
   constructor(private reporter: ErrorReporter) {}
 
@@ -45,18 +46,19 @@ export class Builder implements ListBuilder {
   }
 
   required() {
-    if (!this.hasError && !this.node) {
-      this.reporter.reportError(this.defaultReportRange, "expecting a value");
-      this.hasError = true;
-    }
+    this.isRequired = true;
     return this;
   }
 
   single(): MapItem<ScalarNode> | null {
     if (!this.hasError) {
       if (!isScalar(this.node)) {
-        this.reporter.reportError(this.defaultReportRange, "expecting a list");
-        this.hasError = true;
+        this.reporter.reportError(
+          this.defaultReportRange,
+          "expecting a scalar",
+        );
+      } else if (this.isRequired && !this.node.value) {
+        this.reporter.reportError(this.defaultReportRange, "value is required");
       } else {
         return new MapItem(
           this.keyNode,

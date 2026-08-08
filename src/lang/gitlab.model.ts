@@ -1,10 +1,18 @@
-import { CompletionItem } from "vscode-languageserver";
-import { completionPosition } from "./completion-positioner";
-import { ListNode, MapItem, MapNode, ScalarNode } from "./generic-model";
+import { CompletionItem, Location, Range } from "vscode-languageserver";
+import { CompletionPosition } from "./completion-positioner";
+import {
+  ListNode,
+  MapItem,
+  ScalarNode,
+  Range as InternalRange,
+} from "./generic-model";
+import { ParsedNode, YAMLMap } from "yaml";
+import { GitlabFileContext } from "./gitlab-validator";
 
 export interface CompletionContext {
-  position: completionPosition;
-  file: GitlabFile;
+  document: { uri: string; makeRange: (range: InternalRange) => Range };
+  position: CompletionPosition;
+  context: GitlabFileContext;
 }
 
 export class GitlabFile {
@@ -61,6 +69,32 @@ export class GitlabFile {
     }
     return [];
   }
+
+  gotoDefinitionAt(context: CompletionContext) {
+    if (
+      context.position.path.length > 0 &&
+      context.position.path[0].type == "field"
+    ) {
+      const fieldName = context.position.path[0].name;
+      const job = this.jobs.find((job) => job.keyNode.value === fieldName);
+      if (job) {
+        return job.value.gotoDefinitionAt({
+          ...context,
+          position: {
+            ...context.position,
+            path: context.position.path.slice(1),
+          },
+        });
+      }
+      switch (fieldName) {
+        case "include":
+          // TODO get include index and delegate
+          return [];
+      }
+      return [];
+    }
+    return [];
+  }
 }
 
 export class VariableDefinition {
@@ -108,19 +142,38 @@ export class Workflow {
 
 export class Job {
   stage: MapItem<ScalarNode> | null = null;
+  image: MapItem<ScalarNode> | null = null;
+  tags: MapItem<ListNode> | null = null;
   script: MapItem<ListNode> | null = null;
-  needs: MapItem<ListNode> | null = null;
+  beforeScript: MapItem<ListNode> | null = null;
+  afterScript: MapItem<ListNode> | null = null;
+  needs: MapItem<JobNeed[]> | null = null;
   dependencies: MapItem<ListNode> | null = null;
   extends: MapItem<ListNode> | null = null;
   variables: MapItem<VariableDefinition[]> | null = null;
-  constructor(public name: ScalarNode) {}
+  rules: MapItem<Rule[]> | null = null;
+  retry: MapItem<JobRetry> | null = null;
 
-  completeAt(context: CompletionContext) {
-    if (context.position.path.length == 0) {
-      switch (context.position.type) {
+  built = false;
+  extenders: Job[] = [];
+
+  constructor(
+    public name: ScalarNode,
+    public node: YAMLMap<ParsedNode, ParsedNode | null>,
+  ) {}
+
+  isHidden() {
+    return this.name.value.startsWith(".");
+  }
+
+  completeAt(operationContext: CompletionContext) {
+    if (operationContext.position.path.length == 0) {
+      switch (operationContext.position.type) {
         case "complete-key":
         case "complete-in-key":
-          const result = [];
+        case "complete-value":
+          const result: CompletionItem[] = [];
+          // TODO may insert ": " as well if empty after cursor
           if (!this.stage) {
             result.push({ label: "stage" });
           }
@@ -139,19 +192,20 @@ export class Job {
           return result;
       }
     } else if (
-      context.position.path.length > 0 &&
-      context.position.path[0].type === "field"
+      operationContext.position.path.length > 0 &&
+      operationContext.position.path[0].type === "field"
     ) {
-      const fieldName = context.position.path[0].name;
+      const fieldName = operationContext.position.path[0].name;
       switch (fieldName) {
         case "stage":
-          return (
-            context.file.stages?.value.elements.map((stage) => ({
-              label: stage.value,
-            })) ?? []
-          );
+          return operationContext.context.stages.map((stage, i) => ({
+            label: stage,
+            sortText: i.toString().padStart(3, "0"), // preserve stage order
+          }));
         case "needs":
-          return context.file.jobs
+          // TODO should get values from global context and not just local file
+          // TODO should check the format of the specific selected need (could be an object with multiple fields)
+          return operationContext.context.mainFile.jobs
             .map((job) => job.keyNode)
             .filter((job) => job.value !== this.name.value)
             .map((job) => ({
@@ -161,4 +215,69 @@ export class Job {
     }
     return [];
   }
+
+  gotoDefinitionAt(operationContext: CompletionContext): Location[] {
+    if (
+      operationContext.position.path.length > 0 &&
+      operationContext.position.path[0].type === "field" &&
+      (operationContext.position.type === "complete-in-scalar" ||
+        operationContext.position.type === "complete-value")
+    ) {
+      const fieldName = operationContext.position.path[0].name;
+      switch (fieldName) {
+        case "stage": {
+          const stageDefinition = operationContext.context.stageByName.get(
+            this.stage!.value.value,
+          );
+          if (stageDefinition && stageDefinition.source) {
+            const range = operationContext.document.makeRange(
+              stageDefinition.source.range,
+            );
+            // TODO same document is assumed
+            // TODO should use LocationLink if available to use originSelectionRange
+            return [{ range, uri: operationContext.document.uri }];
+          }
+          return [];
+        }
+      }
+    }
+    return [];
+  }
+}
+
+export class JobNeed {
+  job!: MapItem<ScalarNode>;
+  /** type: boolean default: true */
+  artifacts: MapItem<ScalarNode> | null = null;
+}
+
+export class JobRetry {
+  /**
+   * values: { 0, 1, 2 }
+   * default: 0
+   */
+  max: MapItem<ScalarNode> | null = null;
+  when: MapItem<ListNode> | null = null;
+  /**
+   * type: integer
+   */
+  exitCodes: MapItem<ListNode> | null = null;
+}
+
+export class ComponentSpec {
+  inputs: MapItem<SpecInput>[] = [];
+
+  findInput(name: string) {
+    return this.inputs.find((i) => i.keyNode.value === name);
+  }
+}
+
+export class SpecInput {
+  description: MapItem<ScalarNode> | null = null;
+  default: MapItem<ScalarNode> | null = null;
+  option: MapItem<ListNode> | null = null;
+  regex: MapItem<ScalarNode> | null = null;
+  type: MapItem<ScalarNode> | null = null;
+  rules: MapItem<Rule[]> | null = null;
+  constructor(public name: ScalarNode) {}
 }

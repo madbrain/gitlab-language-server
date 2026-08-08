@@ -6,19 +6,31 @@ import {
   Pair,
   ParsedNode,
   Scalar,
+  YAMLMap,
+  YAMLSeq,
 } from "yaml";
 import { ErrorReporter } from "./error-reporter";
 import {
+  ComponentSpec,
   GitlabFile,
   Include,
   InputArgument,
   Job,
+  JobNeed,
+  JobRetry,
   Rule,
+  SpecInput,
   VariableDefinition,
   Workflow,
 } from "./gitlab.model";
 import { MapItem, Range, ScalarNode } from "./generic-model";
 import { Builder, findMapItemSeparator } from "./generic-builder";
+
+export interface ParsedGitlabFile {
+  uri: string;
+  root: ParsedNode;
+  file: GitlabFile;
+}
 
 export class GitlabFileBuilder {
   private anchors = new Map<string, ParsedNode>();
@@ -42,7 +54,7 @@ export class GitlabFileBuilder {
     }
   }
 
-  parseGitlabFile(node: ParsedNode): GitlabFile | null {
+  parseGitlabFile(uri: string, node: ParsedNode): ParsedGitlabFile | null {
     // TODO use node.resolved(doc) instead of collecting anchors
     this.collectAnchors(node);
 
@@ -126,22 +138,17 @@ export class GitlabFileBuilder {
       } else if (DEPRECATED.includes(fieldName)) {
         this.reporter.reportError(makeRange(item.key), "deprecated");
       } else {
-        if (fieldName.startsWith(".")) {
-          // TODO delay analysis until we known its usage
-          // TODO store them for later analysis
+        if (!item.value) {
+          this.reporter.reportError(makeRange(item.key), "expecting a value");
         } else {
-          if (!item.value) {
-            this.reporter.reportError(makeRange(item.key), "expecting a value");
-          } else {
-            const job = this.parseJob(nameNode, item.value);
-            if (job) {
-              gitlabFile.addJob(new MapItem(nameNode, separator, job));
-            }
+          const job = this.parseJob(nameNode, item.value);
+          if (job) {
+            gitlabFile.addJob(new MapItem(nameNode, separator, job));
           }
         }
       }
     });
-    return gitlabFile;
+    return { uri, root: node, file: gitlabFile };
   }
 
   parseWorkflow(
@@ -332,20 +339,46 @@ export class GitlabFileBuilder {
       this.reporter.reportError(makeRange(node), "expecting a map");
       return null;
     }
-    const job = new Job(nameNode);
+    const job = new Job(nameNode, node);
+    if (!job.isHidden()) {
+      this.parseRealJob(job);
+    }
+    return job;
+  }
+
+  private parseRealJob(job: Job) {
+    const node = job.node;
     node.items.forEach((item) => {
       if (!isScalar(item.key)) {
         this.reporter.reportError(makeRange(item.key), "expecting scalar key");
         return;
       }
       const fieldName = item.key.value as string;
+      const keyNode = new ScalarNode(makeRange(item.key), fieldName);
+      const separator = findMapItemSeparator(item.srcToken!.sep)!;
       if (fieldName === "stage") {
         job.stage = new Builder(this.reporter)
           .fromItem(item)
           .required()
           .single();
+      } else if (fieldName === "image") {
+        job.image = new Builder(this.reporter).fromItem(item).single();
+      } else if (fieldName === "retry") {
+        job.retry = this.parseJobRetry(keyNode, separator, item);
+      } else if (fieldName === "tags") {
+        job.tags = new Builder(this.reporter).fromItem(item).list().ofString();
       } else if (fieldName === "script") {
         job.script = new Builder(this.reporter)
+          .fromItem(item)
+          .singleToList()
+          .ofString();
+      } else if (fieldName === "before_script") {
+        job.beforeScript = new Builder(this.reporter)
+          .fromItem(item)
+          .singleToList()
+          .ofString();
+      } else if (fieldName === "after_script") {
+        job.afterScript = new Builder(this.reporter)
           .fromItem(item)
           .singleToList()
           .ofString();
@@ -356,7 +389,7 @@ export class GitlabFileBuilder {
           .singleToList()
           .ofString();
       } else if (fieldName === "needs") {
-        job.needs = new Builder(this.reporter).fromItem(item).list().ofString();
+        job.needs = this.parseJobNeeds(keyNode, separator, item.value);
       } else if (fieldName === "dependencies") {
         job.dependencies = new Builder(this.reporter)
           .fromItem(item)
@@ -367,14 +400,215 @@ export class GitlabFileBuilder {
           .fromItem(item)
           .map()
           .ofItemString((name, value) => new VariableDefinition(name, value));
+      } else if (fieldName === "rules") {
+        job.rules = this.parseRules(keyNode, separator, item.value);
       } else {
-        this.reporter.reportError(
-          makeRange(item.key),
-          `TODO job::${fieldName}`,
-        );
+        // this.reporter.reportError(
+        //   makeRange(item.key),
+        //   `TODO job::${fieldName}`,
+        // );
       }
     });
-    return job;
+    job.built = true;
+  }
+
+  private parseJobNeeds(
+    keyNode: ScalarNode,
+    separator: number,
+    node: ParsedNode | null,
+  ): MapItem<JobNeed[]> | null {
+    const jobNeeds: JobNeed[] = [];
+    if (!isSeq(node)) {
+      this.reporter.reportError(keyNode.range, "expecting a list");
+    } else {
+      node.items.forEach((item) => {
+        if (isScalar(item)) {
+          const jobNeed = new JobNeed();
+          jobNeed.job = new MapItem(
+            keyNode,
+            separator,
+            new ScalarNode(makeRange(item), item.value as string),
+          );
+          jobNeeds.push(jobNeed);
+        } else if (isMap(item)) {
+          jobNeeds.push(this.parseJobNeed(item));
+        } else {
+          this.reporter.reportError(
+            makeRange(item),
+            "expecting a job name or map",
+          );
+        }
+      });
+    }
+    return new MapItem(keyNode, separator, jobNeeds);
+  }
+
+  private parseJobNeed(
+    node: YAMLMap.Parsed<ParsedNode, ParsedNode | null>,
+  ): JobNeed {
+    let jobNeed = new JobNeed();
+    node.items.forEach((item) => {
+      if (!isScalar(item.key)) {
+        this.reporter.reportError(makeRange(item.key), "expecting scalar key");
+        return;
+      }
+      const fieldName = item.key.value as string;
+      if (fieldName === "job") {
+        jobNeed.job = new Builder(this.reporter)
+          .fromItem(item)
+          .required()
+          .single()!;
+      } else if (fieldName === "artifacts") {
+        jobNeed.artifacts = new Builder(this.reporter).fromItem(item).single();
+      }
+    });
+    return jobNeed;
+  }
+
+  private parseJobRetry(
+    keyNode: ScalarNode,
+    separator: number,
+    retryItem: Pair<ParsedNode, ParsedNode | null>,
+  ): MapItem<JobRetry> {
+    const retry = new JobRetry();
+    if (isMap(retryItem.value)) {
+      retryItem.value.items.forEach((item) => {
+        if (!isScalar(item.key)) {
+          this.reporter.reportError(
+            makeRange(item.key),
+            "expecting scalar key",
+          );
+          return;
+        }
+        const fieldName = item.key.value as string;
+        if (fieldName === "max") {
+          retry.max = new Builder(this.reporter)
+            .fromItem(item)
+            .required()
+            .single();
+        } else if (fieldName === "when") {
+          retry.when = new Builder(this.reporter)
+            .fromItem(item)
+            .singleToList()
+            .ofString();
+        } else if (fieldName === "exit_codes") {
+          retry.exitCodes = new Builder(this.reporter)
+            .fromItem(item)
+            .singleToList()
+            .ofString();
+        }
+      });
+    } else {
+      retry.max = new Builder(this.reporter).fromItem(retryItem).single();
+    }
+    return new MapItem(keyNode, separator, retry);
+  }
+
+  parseComponentSpecDocument(node: ParsedNode) {
+    if (!isMap(node)) {
+      this.reporter.reportError(makeRange(node), "expecting a map");
+      return null;
+    }
+    const componentSpec = new ComponentSpec();
+    node.items.forEach((item) => {
+      if (!isScalar(item.key)) {
+        this.reporter.reportError(makeRange(item.key), "expecting scalar key");
+        return;
+      }
+      const fieldName = item.key.value as string;
+      if (fieldName === "spec") {
+        this.parseComponentSpec(item, componentSpec);
+      } else {
+        this.reporter.reportWarning(makeRange(item.key), "unexpected key");
+      }
+    });
+
+    return componentSpec;
+  }
+
+  private parseComponentSpec(
+    item: Pair<ParsedNode, ParsedNode | null>,
+    componentSpec: ComponentSpec,
+  ) {
+    if (!isMap(item.value)) {
+      this.reporter.reportError(
+        makeRange(item.key),
+        "expecting a map as value",
+      );
+      return;
+    }
+    item.value.items.forEach((item) => {
+      if (!isScalar(item.key)) {
+        this.reporter.reportError(makeRange(item.key), "expecting scalar key");
+        return;
+      }
+      const fieldName = item.key.value as string;
+      if (fieldName === "inputs") {
+        this.parseComponentInputs(item, componentSpec);
+      }
+    });
+  }
+
+  private parseComponentInputs(
+    item: Pair<ParsedNode, ParsedNode | null>,
+    componentSpec: ComponentSpec,
+  ) {
+    if (!isMap(item.value)) {
+      this.reporter.reportError(
+        makeRange(item.key),
+        "expecting a map as value",
+      );
+      return;
+    }
+    item.value.items.forEach((item) => {
+      if (!isScalar(item.key)) {
+        this.reporter.reportError(makeRange(item.key), "expecting scalar key");
+        return;
+      }
+
+      const fieldName = item.key.value as string;
+      const nameNode = new ScalarNode(makeRange(item.key), fieldName);
+      const separator = findMapItemSeparator(item.srcToken!.sep)!;
+      const input = this.parseInput(nameNode, item.value);
+      if (input) {
+        componentSpec.inputs.push(new MapItem(nameNode, separator, input));
+      }
+    });
+  }
+
+  private parseInput(nameNode: ScalarNode, node: ParsedNode | null) {
+    if (!isMap(node)) {
+      this.reporter.reportError(nameNode.range, "expecting a map as value");
+      return null;
+    }
+    const input = new SpecInput(nameNode);
+    node.items.forEach((item) => {
+      if (!isScalar(item.key)) {
+        this.reporter.reportError(makeRange(item.key), "expecting scalar key");
+        return;
+      }
+      const fieldName = item.key.value as string;
+      const keyNode = new ScalarNode(makeRange(item.key), fieldName);
+      const separator = findMapItemSeparator(item.srcToken!.sep)!;
+
+      if (fieldName === "description") {
+        input.description = new Builder(this.reporter).fromItem(item).single();
+      } else if (fieldName === "default") {
+        input.default = new Builder(this.reporter).fromItem(item).single();
+      } else if (fieldName === "option") {
+        input.option = new Builder(this.reporter)
+          .fromItem(item)
+          .list()
+          .ofString();
+      } else if (fieldName === "regex") {
+        input.regex = new Builder(this.reporter).fromItem(item).single();
+      } else if (fieldName === "type") {
+        input.type = new Builder(this.reporter).fromItem(item).single();
+      } else if (fieldName === "rules") {
+        input.rules = this.parseRules(keyNode, separator, item.value);
+      }
+    });
+    return input;
   }
 }
 

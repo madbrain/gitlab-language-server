@@ -1,23 +1,76 @@
-import { URI, Utils } from "vscode-uri";
-import { MyConsole } from "./gitlabci";
+import { URI } from "vscode-uri";
+import * as fs from "fs";
+import * as path from "path";
+import { createHash } from "crypto";
+import { LocalFile, MyConsole } from "./gitlabci";
 
 export class GitlabRemoteCache {
+  private gitlabAPIURL!: URI;
+  private projectIdCache = new Map<string, string>();
+
   constructor(
     private cacheDir: string,
+    gitlabRemoteURL: string,
     private console: MyConsole,
-  ) {}
+  ) {
+    this.gitlabAPIURL = URI.parse(gitlabRemoteURL).with({ path: "api/v4" });
+    fs.mkdirSync(cacheDir, { recursive: true });
+  }
 
-  getProjectFile(gitlabRemoteURL: URI, projectPath: string, filePath: string) {
-    const url = Utils.joinPath(
-      gitlabRemoteURL.with({ path: projectPath }),
-      "-/raw/master",
+  private async getProjectId(projectPath: string) {
+    const projectId = this.projectIdCache.get(projectPath);
+    if (projectId) {
+      return projectId;
+    }
+    const url = `${this.gitlabAPIURL}/projects/${encodeURIComponent(projectPath)}`;
+    return await fetch(url.toString())
+      .then((r) => r.json())
+      .then((r) => {
+        const projectId = r.id;
+        this.projectIdCache.set(projectPath, projectId);
+        return projectId;
+      });
+  }
+
+  async getProjectFile(
+    projectPath: string,
+    filePath: string,
+    ref: string = "HEAD",
+  ): Promise<LocalFile | null> {
+    const projectId = await this.getProjectId(projectPath);
+    const localPath = path.join(
+      this.cacheDir,
+      "projects",
+      projectPath,
+      ref,
       filePath,
     );
+    const url = `${this.gitlabAPIURL}/projects/${projectId}/repository/files/${encodeURIComponent(filePath)}?ref=${ref}`;
 
-    this.console.log(`URL ${url.toString()}`);
+    const fetchAndStore = () => {
+      this.console.log(`FETCH ${url}`);
+      return fetch(url)
+        .then((r) => r.json())
+        .then((r) => {
+          const buffer = Buffer.from(r.content, r.encoding);
+          fs.mkdirSync(path.dirname(localPath), { recursive: true });
+          fs.writeFileSync(localPath, buffer);
+          return { path: localPath, content: buffer.toString("utf-8") };
+        });
+    };
 
-    // TODO download through local cache (`.gitlab-lsp/cache/projects/{project}/{file}`)
-
-    return fetch(url.toString()).then((r) => r.text());
+    if (fs.existsSync(localPath)) {
+      // TODO store lastCheck per file to not check remote sha256 to often
+      const fileContent = fs.readFileSync(localPath, { encoding: "utf-8" });
+      const fileHash = createHash("sha256").update(fileContent).digest("hex");
+      return fetch(url, { method: "HEAD" }).then((r) => {
+        const remoteHash = r.headers.get("x-gitlab-content-sha256");
+        if (fileHash === remoteHash) {
+          return { path: localPath, content: fileContent };
+        }
+        return fetchAndStore();
+      });
+    }
+    return fetchAndStore();
   }
 }
