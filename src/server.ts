@@ -13,6 +13,7 @@ import {
   DiagnosticSeverity,
   Location,
   CompletionItem,
+  LocationLink,
 } from "vscode-languageserver";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { GitlabDocumentCache } from "./documentCache";
@@ -22,6 +23,7 @@ import { Range as InternalRange } from "./lang/generic-model";
 import { CompletionPositioner } from "./lang/completion-positioner";
 import { GenericTextDocument } from "./lang/text-document";
 import { DefaultIncludeResolver, GitlabService } from "./lang/gitlabci";
+import { OperationOption } from "./lang/gitlab.model";
 
 let connection: Connection =
   process.argv.indexOf("--stdio") === -1
@@ -43,12 +45,16 @@ const includeResolver = new DefaultIncludeResolver(logConsole);
 const gitlabService = new GitlabService(includeResolver);
 const gitlabDocumentCache = new GitlabDocumentCache(gitlabService);
 const validationDebouncer = new ValidationDebouncer(500, validateTextDocument);
+const options: OperationOption = {};
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   if (params.workspaceFolders) {
     includeResolver.setWorkspaces(
       params.workspaceFolders.map((workspaceFolder) => workspaceFolder.uri),
     );
+  }
+  if (params.capabilities.textDocument?.definition?.linkSupport) {
+    options.definitionLinkSupport = true;
   }
   return {
     capabilities: {
@@ -80,7 +86,7 @@ function adaptDocument(document: TextDocument) {
     makeRange: (range: InternalRange) => {
       return {
         start: document.positionAt(range.start),
-        end: document.positionAt(range.start),
+        end: document.positionAt(range.end),
       };
     },
   };
@@ -115,7 +121,6 @@ connection.onCompletion(async (params) => {
 
 connection.onDefinition(async (params) => {
   const document = documents.get(params.textDocument.uri);
-  const locations: Location[] = [];
   if (document) {
     const position = document.offsetAt(params.position);
     const cachedEntry = await gitlabDocumentCache.get(document, NullReporter);
@@ -127,17 +132,16 @@ connection.onDefinition(async (params) => {
         connection.console.log(
           `GOTO DEFINITION ${JSON.stringify(documentPosition)}`,
         );
-        locations.push(
-          ...cachedEntry.model.mainFile.gotoDefinitionAt({
-            document: adaptDocument(document),
-            context: cachedEntry.model,
-            position: documentPosition,
-          }),
-        );
+        return cachedEntry.model.mainFile.gotoDefinitionAt({
+          document: adaptDocument(document),
+          context: cachedEntry.model,
+          position: documentPosition,
+          options,
+        });
       }
     }
   }
-  return locations;
+  return [];
 });
 
 async function validateTextDocument(textDocument: TextDocument) {

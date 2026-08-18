@@ -41,9 +41,9 @@ export class GitlabFileContext {
     return null;
   }
 
-  addStage(stage: ScalarNode) {
-    this.stages.push(stage.value);
-    this.stageByName.set(stage.value, new StageDefinition(stage.value, stage));
+  addStage(stageName: string, stage: ScalarNode | null = null) {
+    this.stages.push(stageName);
+    this.stageByName.set(stageName, new StageDefinition(stageName, stage));
   }
 
   isStageBefore(firstStage: string, secondStage: string): boolean {
@@ -107,13 +107,15 @@ export class GitlabFileValidator {
     if (file.stages) {
       context.stages = [];
       context.stageByName = new Map();
+      context.addStage(".pre");
       file.stages.value.elements.forEach((v) => {
         if (context.stageByName.has(v.value)) {
           this.reporter.reportError(v.range, "duplicated stage");
         } else {
-          context.addStage(v);
+          context.addStage(v.value, v);
         }
       });
+      context.addStage(".post");
     }
   }
 
@@ -228,6 +230,7 @@ export class GitlabFileValidator {
             `file is not a valid yaml file`,
           );
         } else {
+          include.context = includedGitlabFile;
           context.includedContexts.push(includedGitlabFile);
         }
       }
@@ -260,6 +263,7 @@ export class GitlabFileValidator {
           `file is not a valid component file`,
         );
       } else {
+        include.context = includedGitlabFile;
         const inputs = include.inputs;
         if (inputs) {
           const args: { [name: string]: string } = {};

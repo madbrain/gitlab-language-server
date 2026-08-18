@@ -1,5 +1,10 @@
-import { CompletionItem, Location, Range } from "vscode-languageserver";
-import { CompletionPosition } from "./completion-positioner";
+import {
+  CompletionItem,
+  Location,
+  LocationLink,
+  Range,
+} from "vscode-languageserver";
+import { CompletionPosition, PathElement } from "./completion-positioner";
 import {
   ListNode,
   MapItem,
@@ -9,10 +14,15 @@ import {
 import { ParsedNode, YAMLMap } from "yaml";
 import { GitlabFileContext } from "./gitlab-validator";
 
+export interface OperationOption {
+  definitionLinkSupport?: boolean;
+}
+
 export interface CompletionContext {
   document: { uri: string; makeRange: (range: InternalRange) => Range };
   position: CompletionPosition;
   context: GitlabFileContext;
+  options?: OperationOption;
 }
 
 export class GitlabFile {
@@ -63,14 +73,46 @@ export class GitlabFile {
       }
       switch (fieldName) {
         case "include":
-          return [];
+          return this.processInclude(
+            context,
+            (include, context) => include.completeAt(context),
+            [],
+          );
       }
-      return [];
     }
     return [];
   }
 
-  gotoDefinitionAt(context: CompletionContext) {
+  private processInclude<T>(
+    context: CompletionContext,
+    cb: (i: Include, c: CompletionContext) => T,
+    def: T,
+  ): T {
+    let newPosition = {
+      ...context.position,
+      path: context.position.path.slice(1),
+    };
+    let include: Include | null = null;
+    if (newPosition.path.length > 0 && newPosition.path[0].type == "item") {
+      const index = newPosition.path[0].index;
+      include = this.include?.value[index] ?? null;
+      newPosition = {
+        ...newPosition,
+        path: newPosition.path.slice(1),
+      };
+    } else {
+      // TODO if field path, check if unique and get first
+    }
+    if (include) {
+      return cb(include, {
+        ...context,
+        position: newPosition,
+      });
+    }
+    return def;
+  }
+
+  gotoDefinitionAt(context: CompletionContext): Location[] | LocationLink[] {
     if (
       context.position.path.length > 0 &&
       context.position.path[0].type == "field"
@@ -88,8 +130,11 @@ export class GitlabFile {
       }
       switch (fieldName) {
         case "include":
-          // TODO get include index and delegate
-          return [];
+          return this.processInclude(
+            context,
+            (include, context) => include.gotoDefinitionAt(context),
+            [],
+          );
       }
       return [];
     }
@@ -117,7 +162,90 @@ export class Include {
 
   inputs: MapItem<InputArgument[]> | null = null;
   rules: MapItem<Rule[]> | null = null;
+
+  // set after validation
+  context: GitlabFileContext | null = null;
+
   constructor() {}
+
+  completeAt(context: CompletionContext): CompletionItem[] {
+    if (
+      context.position.path.length > 0 &&
+      context.position.path[0].type === "field" &&
+      context.position.path[0].name === "inputs"
+    ) {
+      if (this.component && this.context) {
+        const alreadySetInputs = new Set(
+          (this.inputs?.value ?? []).map((i) => i.name.value),
+        );
+        const allRemainingInputs = (this.context.spec?.inputs ?? [])
+          .map((i) => i.keyNode.value)
+          .filter((i) => !alreadySetInputs.has(i));
+        return allRemainingInputs.map((i) => ({ label: i }));
+      }
+    }
+    return [];
+  }
+
+  gotoDefinitionAt(
+    operationContext: CompletionContext,
+  ): Location[] | LocationLink[] {
+    if (
+      operationContext.position.path.length > 0 &&
+      operationContext.position.path[0].type === "field" &&
+      operationContext.position.type === "complete-in-scalar"
+    ) {
+      const fieldName = operationContext.position.path[0].name;
+      if (fieldName === "component" && this.component && this.context) {
+        const sourceRange = this.component.value.range;
+        return makeLocation(
+          operationContext,
+          this.context.uri,
+          sourceRange,
+          this.context.spec?.range ?? InternalRange.NULL,
+        );
+      }
+      if (fieldName === "file" && this.project && this.context) {
+        // TODO should test remaining path to go to other files than first
+        const sourceRange = this.file!.value.elements[0].range;
+        return makeLocation(
+          operationContext,
+          this.context.uri,
+          sourceRange,
+          this.context.spec?.range ?? InternalRange.NULL,
+        );
+      }
+      if (fieldName === "inputs" && this.component && this.context) {
+        // TODO find the correct input field following path and search into this.context.spec
+      }
+    }
+    return [];
+  }
+}
+
+function makeLocation(
+  operationContext: CompletionContext,
+  uri: string,
+  sourceRange: InternalRange,
+  targetRange: InternalRange,
+): Location[] | LocationLink[] {
+  const range = operationContext.document.makeRange(targetRange);
+  if (operationContext.options?.definitionLinkSupport) {
+    return [
+      {
+        originSelectionRange: operationContext.document.makeRange(sourceRange),
+        targetUri: uri,
+        targetRange: range,
+        targetSelectionRange: range,
+      } as LocationLink,
+    ];
+  }
+  return [
+    {
+      range: range,
+      uri: uri,
+    } as Location,
+  ];
 }
 
 export class InputArgument {
@@ -216,7 +344,7 @@ export class Job {
     return [];
   }
 
-  gotoDefinitionAt(operationContext: CompletionContext): Location[] {
+  gotoDefinitionAt(operationContext: CompletionContext) {
     if (
       operationContext.position.path.length > 0 &&
       operationContext.position.path[0].type === "field" &&
@@ -226,18 +354,19 @@ export class Job {
       const fieldName = operationContext.position.path[0].name;
       switch (fieldName) {
         case "stage": {
+          const sourceRange = this.stage!.value.range;
           const stageDefinition = operationContext.context.stageByName.get(
             this.stage!.value.value,
           );
           if (stageDefinition && stageDefinition.source) {
-            const range = operationContext.document.makeRange(
+            // TODO same document is assumed
+            return makeLocation(
+              operationContext,
+              operationContext.document.uri,
+              sourceRange,
               stageDefinition.source.range,
             );
-            // TODO same document is assumed
-            // TODO should use LocationLink if available to use originSelectionRange
-            return [{ range, uri: operationContext.document.uri }];
           }
-          return [];
         }
       }
     }
@@ -265,6 +394,7 @@ export class JobRetry {
 }
 
 export class ComponentSpec {
+  range: InternalRange | null = null;
   inputs: MapItem<SpecInput>[] = [];
 
   findInput(name: string) {

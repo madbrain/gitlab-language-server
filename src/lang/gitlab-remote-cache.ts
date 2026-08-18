@@ -4,6 +4,8 @@ import * as path from "path";
 import { createHash } from "crypto";
 import { LocalFile, MyConsole } from "./gitlabci";
 
+const MIN_CACHE_CHECK_MIN = 5;
+
 export class GitlabRemoteCache {
   private gitlabAPIURL!: URI;
   private projectIdCache = new Map<string, string>();
@@ -60,8 +62,13 @@ export class GitlabRemoteCache {
     };
 
     if (fs.existsSync(localPath)) {
-      // TODO store lastCheck per file to not check remote sha256 to often
+      const changeMinutes =
+        (new Date().valueOf() - fs.statSync(localPath).mtime.valueOf()) /
+        (1000 * 60);
       const fileContent = fs.readFileSync(localPath, { encoding: "utf-8" });
+      if (changeMinutes < MIN_CACHE_CHECK_MIN) {
+        return { path: localPath, content: fileContent };
+      }
       const fileHash = createHash("sha256").update(fileContent).digest("hex");
       return fetch(url, { method: "HEAD" }).then((r) => {
         const remoteHash = r.headers.get("x-gitlab-content-sha256");

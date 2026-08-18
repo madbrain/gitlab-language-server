@@ -537,6 +537,7 @@ export class GitlabFileBuilder {
       );
       return;
     }
+    componentSpec.range = makeRange(item.key);
     item.value.items.forEach((item) => {
       if (!isScalar(item.key)) {
         this.reporter.reportError(makeRange(item.key), "expecting scalar key");

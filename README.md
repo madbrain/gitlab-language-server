@@ -1,3 +1,1 @@
-
 # Gitlab CI LSP Server
-
