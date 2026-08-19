@@ -10,7 +10,10 @@ import {
 import { MapItem, ScalarNode } from "./generic-model";
 import { GitlabService, LocalFile } from "./gitlabci";
 import { ParsedNode } from "yaml";
+import * as path from "path";
 import { ParsedGitlabFile } from "./gitlab-builder";
+import { expandText } from "./variable-expander";
+import { URI } from "vscode-uri";
 
 export class GitlabFileContext {
   stages = DEFAULT_STAGES;
@@ -61,6 +64,7 @@ class StageDefinition {
 }
 
 export interface IncludeResolver {
+  findLocalFile(value: string): Promise<LocalFile | null>;
   findComponentFile(componentPath: string): Promise<LocalFile | null>;
   findProjectFile(
     projectPath: string,
@@ -69,10 +73,15 @@ export interface IncludeResolver {
   ): Promise<LocalFile | null>;
 }
 
+export interface VariablesProvider {
+  getProjectVariables(): Promise<{ [name: string]: string }>;
+}
+
 export class GitlabFileValidator {
   constructor(
     private reporter: ErrorReporter,
     private includeResolver: IncludeResolver,
+    private variablesProvider: VariablesProvider,
     private gitlabService: GitlabService,
   ) {}
 
@@ -174,10 +183,7 @@ export class GitlabFileValidator {
           context,
         );
       } else if (include.local) {
-        this.reporter.reportWarning(
-          include.local.keyNode.range,
-          "TODO include::local",
-        );
+        await this.validateLocalInclude(include, include.local, context);
       } else if (include.remote) {
         this.reporter.reportWarning(
           include.remote.keyNode.range,
@@ -207,7 +213,8 @@ export class GitlabFileValidator {
       );
       return;
     }
-    const projectPath = project.value.value;
+    const envs = await this.variablesProvider.getProjectVariables();
+    const projectPath = expandText(project.value.value, envs);
     const ref = include.ref?.value.value ?? null;
     for (const file of include.file.value.elements) {
       const includedFile = await this.includeResolver.findProjectFile(
@@ -265,6 +272,8 @@ export class GitlabFileValidator {
       } else {
         include.context = includedGitlabFile;
         const inputs = include.inputs;
+
+        // TODO externalize inputs validation
         if (inputs) {
           const args: { [name: string]: string } = {};
           const spec = includedGitlabFile.spec;
@@ -323,6 +332,42 @@ export class GitlabFileValidator {
         }
       }
     }
+  }
+
+  private async validateLocalInclude(
+    include: Include,
+    local: MapItem<ScalarNode>,
+    context: GitlabFileContext,
+  ) {
+    const localPath = path.join(
+      path.dirname(URI.parse(context.uri).fsPath),
+      local.value.value,
+    );
+
+    const includedFile = await this.includeResolver.findLocalFile(localPath);
+    if (!includedFile) {
+      this.reporter.reportWarning(local.value.range, `cannot resolve include`);
+      return;
+    }
+
+    const includedGitlabFile = await this.gitlabService.validateDocument(
+      "file:" + includedFile.path,
+      includedFile.content,
+      NullReporter,
+    );
+    if (!includedGitlabFile) {
+      this.reporter.reportWarning(
+        local.value.range,
+        `file is not a valid file`,
+      );
+      return;
+    }
+
+    // TODO validate inputs if present
+    this.reporter.reportWarning(
+      local.keyNode.range,
+      `TODO ${includedGitlabFile.uri}`,
+    );
   }
 
   private validateRules(rules: Rule[]) {

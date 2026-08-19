@@ -4,20 +4,31 @@ import { resolve } from "path";
 import { ConsoleErrorReporter } from "./console-error-reporter";
 import { DefaultIncludeResolver, GitlabService } from "./gitlabci";
 import { URI } from "vscode-uri";
+import { VariablesProvider } from "./gitlab-validator";
 
 describe("Parse and convert", async () => {
   test("Should parse and validate Root GitlabCI", async () => {
     const workspaceRoot = resolve("../workspace/atomix");
-    const text = readFileSync(workspaceRoot + "/.gitlab-ci.yml", "utf8");
+    const testFilename = workspaceRoot + "/.gitlab-ci.yml";
+    const text = readFileSync(testFilename, "utf8");
 
     const reporter = new ConsoleErrorReporter();
     const logConsole = { log: console.log };
     const includeResolver = new DefaultIncludeResolver(logConsole);
     includeResolver.setWorkspaces([URI.file(workspaceRoot).toString()]);
-    const gitlabService = new GitlabService(includeResolver);
+    const variablesProvider: VariablesProvider = {
+      getProjectVariables() {
+        return new Promise((resolve, reject) => {
+          resolve({
+            CI_PROJECT_NAMESPACE: "gnome",
+          });
+        });
+      },
+    };
+    const gitlabService = new GitlabService(includeResolver, variablesProvider);
 
     const result = await gitlabService.validateDocument(
-      "file:test.yml",
+      "file:" + testFilename,
       text,
       reporter,
     );
@@ -37,7 +48,14 @@ describe("Parse and convert", async () => {
     const logConsole = { log: console.log };
     const includeResolver = new DefaultIncludeResolver(logConsole);
     includeResolver.setWorkspaces([URI.file(workspaceRoot).toString()]);
-    const gitlabService = new GitlabService(includeResolver);
+    const variablesProvider: VariablesProvider = {
+      getProjectVariables() {
+        return new Promise((resolve, reject) => {
+          resolve({});
+        });
+      },
+    };
+    const gitlabService = new GitlabService(includeResolver, variablesProvider);
 
     const result = await gitlabService.validateDocument(
       "file:.gitlab-lsp/cache/projects/GNOME/citemplates/master/templates/release-service.yml",
