@@ -10,6 +10,7 @@ import {
   GitlabFileContext,
   GitlabFileValidator,
   IncludeResolver,
+  VariablesProvider,
 } from "./gitlab-validator";
 import { GitlabRemoteCache } from "./gitlab-remote-cache";
 
@@ -29,6 +30,7 @@ export class DefaultIncludeResolver implements IncludeResolver {
   constructor(private console: MyConsole) {}
 
   setWorkspaces(workspacesUri: string[]) {
+    // TODO move local git config resolution to other service
     this.workspacesUri = workspacesUri;
     const gitlabRemoteURLs = this.workspacesUri.flatMap((uri) => {
       const workspacePath = URI.parse(uri).fsPath;
@@ -114,11 +116,19 @@ export class DefaultIncludeResolver implements IncludeResolver {
     }
   }
 
-  // TODO local file
+  findLocalFile(path: string): Promise<LocalFile | null> {
+    return fs.promises
+      .readFile(path, "utf-8")
+      .then((content) => ({ path, content }))
+      .catch((e) => null);
+  }
 }
 
 export class GitlabService {
-  constructor(private includeResolver: IncludeResolver) {}
+  constructor(
+    private includeResolver: IncludeResolver,
+    private variablesProvider: VariablesProvider,
+  ) {}
 
   private parseDocuments(text: string, reporter: ErrorReporter) {
     const options: ParseOptions = { keepSourceTokens: true };
@@ -164,6 +174,7 @@ export class GitlabService {
         return await new GitlabFileValidator(
           reporter,
           this.includeResolver,
+          this.variablesProvider,
           this,
         ).validate(parsedFile, spec);
       }

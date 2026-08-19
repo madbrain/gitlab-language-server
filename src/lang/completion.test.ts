@@ -3,8 +3,8 @@ import { ConsoleErrorReporter } from "./console-error-reporter";
 import { GenericTextDocument } from "./text-document";
 import { DefaultIncludeResolver, GitlabService } from "./gitlabci";
 import { CompletionPositioner } from "./completion-positioner";
-import { CompletionItem } from "vscode-languageserver";
-import { TextDocument } from "vscode-languageserver-textdocument";
+import { CompletionItem, Range } from "vscode-languageserver";
+import { VariablesProvider } from "./gitlab-validator";
 
 function code(text: string) {
   const offset = text.indexOf("@");
@@ -22,7 +22,14 @@ async function testComplete(
   const reporter = new ConsoleErrorReporter();
   const includeResolver = new DefaultIncludeResolver(logConsole);
   includeResolver.setWorkspaces(["./test"]);
-  const gitlabService = new GitlabService(includeResolver);
+  const variablesProvider: VariablesProvider = {
+    getProjectVariables() {
+      return new Promise((resolve, reject) => {
+        resolve({});
+      });
+    },
+  };
+  const gitlabService = new GitlabService(includeResolver, variablesProvider);
 
   const { text, offset } = code(content);
 
@@ -41,7 +48,10 @@ async function testComplete(
 
   if (gitlabFileContext && completionPosition) {
     const completions = gitlabFileContext.mainFile.completeAt({
-      document: {} as TextDocument,
+      document: {
+        uri: "",
+        makeRange: (r) => ({}) as Range,
+      },
       context: gitlabFileContext,
       position: completionPosition,
     });
@@ -90,10 +100,20 @@ my_job:
 
     testComplete(content, [
       {
+        label: ".pre",
+        sortText: "000",
+      },
+      {
         label: "build",
+        sortText: "001",
       },
       {
         label: "test",
+        sortText: "002",
+      },
+      {
+        label: ".post",
+        sortText: "003",
       },
     ]);
   });
@@ -110,10 +130,20 @@ my_job:
 
     testComplete(content, [
       {
+        label: ".pre",
+        sortText: "000",
+      },
+      {
         label: "build",
+        sortText: "001",
       },
       {
         label: "test",
+        sortText: "002",
+      },
+      {
+        label: ".post",
+        sortText: "003",
       },
     ]);
   });
