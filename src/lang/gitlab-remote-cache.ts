@@ -25,7 +25,8 @@ export class GitlabRemoteCache {
       return projectId;
     }
     const url = `${this.gitlabAPIURL}/projects/${encodeURIComponent(projectPath)}`;
-    return await fetch(url.toString())
+    this.console.log(`FETCH PROJECT INFO ${url}`);
+    return await fetch(url)
       .then((r) => r.json())
       .then((r) => {
         const projectId = r.id;
@@ -70,6 +71,7 @@ export class GitlabRemoteCache {
         return { path: localPath, content: fileContent };
       }
       const fileHash = createHash("sha256").update(fileContent).digest("hex");
+      this.console.log(`FETCH CHECK ${url}`);
       return fetch(url, { method: "HEAD" }).then((r) => {
         const remoteHash = r.headers.get("x-gitlab-content-sha256");
         if (fileHash === remoteHash) {
