@@ -37,24 +37,37 @@ export class DefaultIncludeResolver implements IncludeResolver {
         const gitconfig = parseGitConfig.sync({ path: gitConfigPath });
         return Object.keys(gitconfig)
           .filter((k) => k.startsWith("remote "))
-          .map((k) => ({
-            workspacePath,
-            gitlabRemoteUrl: URI.parse(gitconfig[k].url)
-              .with({ path: "" })
-              .toString(),
-          }));
+          .flatMap((k) => {
+            try {
+              return [
+                {
+                  workspacePath,
+                  gitlabRemoteUrl: URI.parse(gitconfig[k].url)
+                    .with({ path: "" })
+                    .toString(),
+                },
+              ];
+            } catch (e) {
+              // probably an git ssh URL, should we support it as well ?
+              return [];
+            }
+          });
       } else {
         return [];
       }
     });
     if (gitlabRemoteURLs.length === 1) {
+      const workspaceInfo = gitlabRemoteURLs[0];
+      this.console.log(
+        `Detected remote ${workspaceInfo.gitlabRemoteUrl} in ${workspaceInfo.workspacePath}`,
+      );
       const cacheDir = path.join(
-        gitlabRemoteURLs[0].workspacePath,
+        workspaceInfo.workspacePath,
         ".gitlab-lsp/cache",
       );
       this.gitlabRemoteCache = new GitlabRemoteCache(
         cacheDir,
-        gitlabRemoteURLs[0].gitlabRemoteUrl,
+        workspaceInfo.gitlabRemoteUrl,
         this.console,
       );
     }
@@ -71,11 +84,15 @@ export class DefaultIncludeResolver implements IncludeResolver {
     const [componentName, specificVersion] = componentPath
       .slice(componentNamePos + 1)
       .split("@");
-    return this.gitlabRemoteCache.getProjectFile(
-      projectPath,
-      `templates/${componentName}.yml`,
-      specificVersion,
-    );
+    try {
+      return await this.gitlabRemoteCache.getProjectFile(
+        projectPath,
+        `templates/${componentName}.yml`,
+        specificVersion,
+      );
+    } catch {
+      return null;
+    }
   }
 
   async findProjectFile(
@@ -86,11 +103,15 @@ export class DefaultIncludeResolver implements IncludeResolver {
     if (!this.gitlabRemoteCache) {
       return null;
     }
-    return await this.gitlabRemoteCache.getProjectFile(
-      projectPath,
-      filePath,
-      ref ?? "HEAD",
-    );
+    try {
+      return await this.gitlabRemoteCache.getProjectFile(
+        projectPath,
+        filePath,
+        ref ?? "HEAD",
+      );
+    } catch {
+      return null;
+    }
   }
 
   // TODO local file
