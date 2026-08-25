@@ -2,7 +2,7 @@ import { ErrorReporter } from "./error-reporter";
 import { Range } from "./generic-model";
 
 export class ConsoleErrorReporter implements ErrorReporter {
-  private errors: {
+  errors: {
     type: "warning" | "error";
     range: Range;
     message: string;

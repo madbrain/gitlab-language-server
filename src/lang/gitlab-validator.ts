@@ -14,6 +14,7 @@ import * as path from "path";
 import { ParsedGitlabFile } from "./gitlab-builder";
 import { expandText } from "./variable-expander";
 import { URI } from "vscode-uri";
+import { TemplateParser, TextTemplate } from "./template-parser";
 
 export class GitlabFileContext {
   stages = DEFAULT_STAGES;
@@ -203,7 +204,7 @@ export class GitlabFileValidator {
 
   private async validateIncludeProject(
     include: Include,
-    project: MapItem<ScalarNode>,
+    project: MapItem<TextTemplate>,
     context: GitlabFileContext,
   ) {
     if (!include.file) {
@@ -214,12 +215,12 @@ export class GitlabFileValidator {
       return;
     }
     const envs = await this.variablesProvider.getProjectVariables();
-    const projectPath = expandText(project.value.value, envs);
-    const ref = include.ref?.value.value ?? null;
+    const projectPath = project.value.expandText(envs);
+    const ref = include.ref?.value.expandText(envs) ?? null;
     for (const file of include.file.value.elements) {
       const includedFile = await this.includeResolver.findProjectFile(
         projectPath,
-        file.value,
+        file.expandText(envs),
         ref,
       );
       if (!includedFile) {
@@ -246,10 +247,11 @@ export class GitlabFileValidator {
 
   private async validateIncludeComponent(
     include: Include,
-    component: MapItem<ScalarNode>,
+    component: MapItem<TextTemplate>,
     context: GitlabFileContext,
   ) {
-    const componentPath = component.value.value!;
+    const envs = await this.variablesProvider.getProjectVariables();
+    const componentPath = component.value.expandText(envs);
     const includedFile =
       await this.includeResolver.findComponentFile(componentPath);
     if (!includedFile) {
@@ -336,12 +338,13 @@ export class GitlabFileValidator {
 
   private async validateLocalInclude(
     include: Include,
-    local: MapItem<ScalarNode>,
+    local: MapItem<TextTemplate>,
     context: GitlabFileContext,
   ) {
+    const envs = await this.variablesProvider.getProjectVariables();
     const localPath = path.join(
       path.dirname(URI.parse(context.uri).fsPath),
-      local.value.value,
+      local.value.expandText(envs),
     );
 
     const includedFile = await this.includeResolver.findLocalFile(localPath);

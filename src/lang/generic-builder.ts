@@ -10,11 +10,19 @@ import {
 } from "yaml";
 import { ErrorReporter } from "./error-reporter";
 import { makeRange } from "./gitlab-builder";
-import { ListNode, MapItem, Range, ScalarNode } from "./generic-model";
+import {
+  ListNode,
+  ListTemplateNode,
+  MapItem,
+  Range,
+  ScalarNode,
+} from "./generic-model";
+import { TemplateParser, TextTemplate } from "./template-parser";
 
 export interface ListBuilder {
   minItems(count: number): ListBuilder;
   ofString(): MapItem<ListNode>;
+  ofStringTemplate(): MapItem<ListTemplateNode>;
 }
 
 export interface MapBuilder {
@@ -70,6 +78,30 @@ export class Builder implements ListBuilder {
     return null;
   }
 
+  singleTemplate(): MapItem<TextTemplate> | null {
+    if (!this.hasError) {
+      if (!isScalar(this.node)) {
+        this.reporter.reportError(
+          this.defaultReportRange,
+          "expecting a scalar",
+        );
+      } else if (this.isRequired && !this.node.value) {
+        this.reporter.reportError(this.defaultReportRange, "value is required");
+      } else {
+        return new MapItem(
+          this.keyNode,
+          this.separatorOffset,
+          new TemplateParser(
+            this.node.value as string,
+            makeRange(this.node),
+            this.reporter,
+          ).parse(),
+        );
+      }
+    }
+    return null;
+  }
+
   singleToList(): ListBuilder {
     if (!this.hasError) {
       if (isScalar(this.node)) {
@@ -117,6 +149,31 @@ export class Builder implements ListBuilder {
       this.keyNode,
       this.separatorOffset,
       new ListNode(makeRange(this.node!!), elements),
+    );
+  }
+
+  ofStringTemplate(): MapItem<ListTemplateNode> {
+    const elements: TextTemplate[] = [];
+    this.items.forEach((item) => {
+      if (isScalar(item)) {
+        elements.push(
+          new TemplateParser(
+            item.value as string,
+            makeRange(item),
+            this.reporter,
+          ).parse(),
+        );
+      } else {
+        this.reporter.reportError(
+          makeRange(item),
+          "expecting a template scalar",
+        );
+      }
+    });
+    return new MapItem(
+      this.keyNode,
+      this.separatorOffset,
+      new ListTemplateNode(makeRange(this.node!!), elements),
     );
   }
 
