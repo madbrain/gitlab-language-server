@@ -10,9 +10,11 @@ import {
   MapItem,
   ScalarNode,
   Range as InternalRange,
+  ListTemplateNode,
 } from "./generic-model";
 import { ParsedNode, YAMLMap } from "yaml";
 import { GitlabFileContext } from "./gitlab-validator";
+import { TextTemplate } from "./template-parser";
 
 export interface OperationOption {
   definitionLinkSupport?: boolean;
@@ -150,15 +152,15 @@ export class VariableDefinition {
 }
 
 export class Include {
-  component: MapItem<ScalarNode> | null = null;
-  local: MapItem<ScalarNode> | null = null;
-  project: MapItem<ScalarNode> | null = null;
-  remote: MapItem<ScalarNode> | null = null;
-  template: MapItem<ScalarNode> | null = null;
+  component: MapItem<TextTemplate> | null = null;
+  local: MapItem<TextTemplate> | null = null;
+  project: MapItem<TextTemplate> | null = null;
+  remote: MapItem<TextTemplate> | null = null;
+  template: MapItem<TextTemplate> | null = null;
 
   // project
-  file: MapItem<ListNode> | null = null;
-  ref: MapItem<ScalarNode> | null = null;
+  file: MapItem<ListTemplateNode> | null = null;
+  ref: MapItem<TextTemplate> | null = null;
 
   inputs: MapItem<InputArgument[]> | null = null;
   rules: MapItem<Rule[]> | null = null;

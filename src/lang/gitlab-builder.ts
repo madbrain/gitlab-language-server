@@ -25,6 +25,7 @@ import {
 } from "./gitlab.model";
 import { MapItem, Range, ScalarNode } from "./generic-model";
 import { Builder, findMapItemSeparator } from "./generic-builder";
+import { TemplateParser } from "./template-parser";
 
 export interface ParsedGitlabFile {
   uri: string;
@@ -91,38 +92,7 @@ export class GitlabFileBuilder {
       } else if (fieldName === "default") {
         this.reporter.reportWarning(makeRange(item.key), "TODO");
       } else if (fieldName === "include") {
-        const includes = [];
-        if (!item.value) {
-          this.reporter.reportError(makeRange(item.key), "expecting a value");
-        } else if (isScalar(item.value)) {
-          const value = new ScalarNode(
-            makeRange(item.value),
-            item.value.value as string,
-          );
-
-          // TODO could also be remote depending on the URL
-          const include = new Include();
-          include.local = new MapItem(nameNode, separator, value);
-          includes.push(include);
-        } else if (isMap(item.value)) {
-          const include = this.parseInclude(item.value);
-          if (include) {
-            includes.push(include);
-          }
-        } else if (isSeq(item.value)) {
-          item.value.items.forEach((item) => {
-            const include = this.parseInclude(item);
-            if (include) {
-              includes.push(include);
-            }
-          });
-        } else {
-          this.reporter.reportError(
-            makeRange(item.key),
-            "expecting a map or list",
-          );
-        }
-        gitlabFile.include = new MapItem(nameNode, separator, includes);
+        gitlabFile.include = this.parseIncludes(item, nameNode, separator);
       } else if (fieldName === "variables") {
         gitlabFile.variables = new Builder(this.reporter)
           .fromItem(item)
@@ -195,6 +165,43 @@ export class GitlabFileBuilder {
     );
   }
 
+  private parseIncludes(
+    item: Pair<ParsedNode, ParsedNode | null>,
+    nameNode: ScalarNode,
+    separator: number,
+  ): MapItem<Include[]> | null {
+    const includes = [];
+    if (!item.value) {
+      this.reporter.reportError(makeRange(item.key), "expecting a value");
+    } else if (isScalar(item.value)) {
+      const value = new TemplateParser(
+        item.value.value as string,
+        makeRange(item.value),
+        this.reporter,
+      ).parse();
+
+      // TODO could also be remote depending on the URL, but depends on the evaluation of the template
+      const include = new Include();
+      include.local = new MapItem(nameNode, separator, value);
+      includes.push(include);
+    } else if (isMap(item.value)) {
+      const include = this.parseInclude(item.value);
+      if (include) {
+        includes.push(include);
+      }
+    } else if (isSeq(item.value)) {
+      item.value.items.forEach((item) => {
+        const include = this.parseInclude(item);
+        if (include) {
+          includes.push(include);
+        }
+      });
+    } else {
+      this.reporter.reportError(makeRange(item.key), "expecting a map or list");
+    }
+    return new MapItem(nameNode, separator, includes);
+  }
+
   private parseInclude(node: ParsedNode) {
     if (!isMap(node)) {
       this.reporter.reportError(makeRange(node), "expecting a map");
@@ -213,39 +220,39 @@ export class GitlabFileBuilder {
         include.component = new Builder(this.reporter)
           .fromItem(item)
           .required()
-          .single();
+          .singleTemplate();
       } else if (fieldName === "local") {
         // TODO also default value when include is single
         include.local = new Builder(this.reporter)
           .fromItem(item)
           .required()
-          .single();
+          .singleTemplate();
       } else if (fieldName === "project") {
         include.project = new Builder(this.reporter)
           .fromItem(item)
           .required()
-          .single();
+          .singleTemplate();
       } else if (fieldName === "file") {
         include.file = new Builder(this.reporter)
           .fromItem(item)
           .required()
           .singleToList()
-          .ofString();
+          .ofStringTemplate();
       } else if (fieldName === "ref") {
         include.ref = new Builder(this.reporter)
           .fromItem(item)
           .required()
-          .single();
+          .singleTemplate();
       } else if (fieldName === "remote") {
         include.remote = new Builder(this.reporter)
           .fromItem(item)
           .required()
-          .single();
+          .singleTemplate();
       } else if (fieldName === "template") {
         include.template = new Builder(this.reporter)
           .fromItem(item)
           .required()
-          .single();
+          .singleTemplate();
       } else if (fieldName === "inputs") {
         include.inputs = new Builder(this.reporter)
           .fromItem(item)

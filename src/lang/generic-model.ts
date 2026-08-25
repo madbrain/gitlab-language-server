@@ -1,3 +1,5 @@
+import { TextTemplate } from "./template-parser";
+
 export class Range {
   static NULL = new Range(-1, -1);
   constructor(
@@ -98,6 +100,15 @@ export class ListNode extends AstNode {
   constructor(
     range: Range,
     public elements: ScalarNode[],
+  ) {
+    super(range);
+  }
+}
+
+export class ListTemplateNode extends AstNode {
+  constructor(
+    range: Range,
+    public elements: TextTemplate[],
   ) {
     super(range);
   }
