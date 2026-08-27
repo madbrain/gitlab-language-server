@@ -53,8 +53,10 @@ const variablesProvider: VariablesProvider = {
         if (!settings) {
           return {};
         }
-        connection.console.log(`CONF ${settings.project.variables}`)
-        return expandVariables((settings as GitlabCISettings).project.variables);
+        connection.console.log(`CONF ${settings.project.variables}`);
+        return expandVariables(
+          (settings as GitlabCISettings).project.variables,
+        );
       });
   },
 };
@@ -183,20 +185,13 @@ connection.onDefinition(async (params) => {
     const position = document.offsetAt(params.position);
     const cachedEntry = await gitlabDocumentCache.get(document, NullReporter);
     if (cachedEntry && cachedEntry.content && cachedEntry.model) {
-      const documentPosition = new CompletionPositioner(
-        new GenericTextDocument(document.getText()),
-      ).findAtPosition(cachedEntry.content, position);
-      if (documentPosition) {
-        connection.console.log(
-          `GOTO DEFINITION ${JSON.stringify(documentPosition)}`,
-        );
-        return cachedEntry.model.mainFile.gotoDefinitionAt({
-          document: adaptDocument(document),
-          context: cachedEntry.model,
-          position: documentPosition,
-          options,
-        });
-      }
+      connection.console.log(`GOTO DEFINITION ${position}`);
+      return cachedEntry.model.mainFile.gotoDefinitionAt({
+        document: adaptDocument(document),
+        context: cachedEntry.model,
+        position: position,
+        options,
+      });
     }
   }
   return [];

@@ -27,6 +27,13 @@ export interface CompletionContext {
   options?: OperationOption;
 }
 
+export interface GotoDefinitionContext {
+  document: { uri: string; makeRange: (range: InternalRange) => Range };
+  position: number;
+  context: GitlabFileContext;
+  options?: OperationOption;
+}
+
 export class GitlabFile {
   include: MapItem<Include[]> | null = null;
   variables: MapItem<VariableDefinition[]> | null = null;
@@ -114,31 +121,46 @@ export class GitlabFile {
     return def;
   }
 
-  gotoDefinitionAt(context: CompletionContext): Location[] | LocationLink[] {
-    if (
-      context.position.path.length > 0 &&
-      context.position.path[0].type == "field"
-    ) {
-      const fieldName = context.position.path[0].name;
-      const job = this.jobs.find((job) => job.keyNode.value === fieldName);
-      if (job) {
-        return job.value.gotoDefinitionAt({
-          ...context,
-          position: {
-            ...context.position,
-            path: context.position.path.slice(1),
-          },
-        });
+  gotoDefinitionAt(
+    context: GotoDefinitionContext,
+  ): Location[] | LocationLink[] {
+    const job = this.jobs.find((job) => job.range.contains(context.position));
+    if (job) {
+      return job.value.gotoDefinitionAt(context);
+    }
+    if (this.variables?.range.contains(context.position)) {
+      // TODO temporary should use variable definitions stack
+      const envs: { [name: string]: ScalarNode } = {};
+      this.variables.value.forEach(
+        (variable) => (envs[variable.name.value] = variable.name),
+      );
+      for (let variableDefinition of this.variables.value) {
+        if (variableDefinition.value.range.contains(context.position)) {
+          for (let element of variableDefinition.value.elements) {
+            if (
+              element.type === "variable" &&
+              element.range.contains(context.position)
+            ) {
+              const name = envs[element.name];
+              if (name) {
+                return makeLocation(
+                  context,
+                  context.document.uri,
+                  element.range,
+                  name.range,
+                );
+              }
+            }
+          }
+        }
       }
-      switch (fieldName) {
-        case "include":
-          return this.processInclude(
-            context,
-            (include, context) => include.gotoDefinitionAt(context),
-            [],
-          );
+    }
+    if (this.include?.range.contains(context.position)) {
+      for (let include of this.include.value) {
+        if (include.range.contains(context.position)) {
+          return include.gotoDefinitionAt(context);
+        }
       }
-      return [];
     }
     return [];
   }
@@ -147,7 +169,7 @@ export class GitlabFile {
 export class VariableDefinition {
   constructor(
     public name: ScalarNode,
-    public value: ScalarNode,
+    public value: TextTemplate,
   ) {}
 }
 
@@ -168,7 +190,7 @@ export class Include {
   // set after validation
   context: GitlabFileContext | null = null;
 
-  constructor() {}
+  constructor(public range: InternalRange) {}
 
   completeAt(context: CompletionContext): CompletionItem[] {
     if (
@@ -190,43 +212,43 @@ export class Include {
   }
 
   gotoDefinitionAt(
-    operationContext: CompletionContext,
+    operationContext: GotoDefinitionContext,
   ): Location[] | LocationLink[] {
     if (
-      operationContext.position.path.length > 0 &&
-      operationContext.position.path[0].type === "field" &&
-      operationContext.position.type === "complete-in-scalar"
+      this.component &&
+      this.context &&
+      this.component.range.contains(operationContext.position)
     ) {
-      const fieldName = operationContext.position.path[0].name;
-      if (fieldName === "component" && this.component && this.context) {
-        const sourceRange = this.component.value.range;
-        return makeLocation(
-          operationContext,
-          this.context.uri,
-          sourceRange,
-          this.context.spec?.range ?? InternalRange.NULL,
-        );
-      }
-      if (fieldName === "file" && this.project && this.context) {
-        // TODO should test remaining path to go to other files than first
-        const sourceRange = this.file!.value.elements[0].range;
-        return makeLocation(
-          operationContext,
-          this.context.uri,
-          sourceRange,
-          this.context.spec?.range ?? InternalRange.NULL,
-        );
-      }
-      if (fieldName === "inputs" && this.component && this.context) {
-        // TODO find the correct input field following path and search into this.context.spec
-      }
+      const sourceRange = this.component.value.range;
+      return makeLocation(
+        operationContext,
+        this.context.uri,
+        sourceRange,
+        this.context.spec?.range ?? InternalRange.NULL,
+      );
     }
+    if (
+      this.project &&
+      this.context &&
+      this.file?.range.contains(operationContext.position)
+    ) {
+      // TODO should test remaining path to go to other files than first
+      const sourceRange = this.file!.value.elements[0].range;
+      return makeLocation(
+        operationContext,
+        this.context.uri,
+        sourceRange,
+        this.context.spec?.range ?? InternalRange.NULL,
+      );
+    }
+    // TODO inputs
+    // TODO find the correct input field following path and search into this.context.spec
     return [];
   }
 }
 
 function makeLocation(
-  operationContext: CompletionContext,
+  operationContext: GotoDefinitionContext,
   uri: string,
   sourceRange: InternalRange,
   targetRange: InternalRange,
@@ -346,27 +368,64 @@ export class Job {
     return [];
   }
 
-  gotoDefinitionAt(operationContext: CompletionContext) {
-    if (
-      operationContext.position.path.length > 0 &&
-      operationContext.position.path[0].type === "field" &&
-      (operationContext.position.type === "complete-in-scalar" ||
-        operationContext.position.type === "complete-value")
-    ) {
-      const fieldName = operationContext.position.path[0].name;
-      switch (fieldName) {
-        case "stage": {
-          const sourceRange = this.stage!.value.range;
-          const stageDefinition = operationContext.context.stageByName.get(
-            this.stage!.value.value,
-          );
-          if (stageDefinition && stageDefinition.source) {
-            // TODO same document is assumed
+  gotoDefinitionAt(operationContext: GotoDefinitionContext) {
+    if (this.stage?.range.contains(operationContext.position)) {
+      const sourceRange = this.stage!.value.range;
+      const stageDefinition = operationContext.context.stageByName.get(
+        this.stage!.value.value,
+      );
+      if (stageDefinition && stageDefinition.source) {
+        // TODO same document is assumed
+        return makeLocation(
+          operationContext,
+          operationContext.document.uri,
+          sourceRange,
+          stageDefinition.source.range,
+        );
+      }
+    }
+    if (this.extends?.value.range.contains(operationContext.position)) {
+      for (let extend of this.extends.value.elements) {
+        if (extend.range.contains(operationContext.position)) {
+          const targetJob = operationContext.context.findJob(extend.value);
+          if (targetJob) {
             return makeLocation(
               operationContext,
-              operationContext.document.uri,
-              sourceRange,
-              stageDefinition.source.range,
+              operationContext.document.uri, // TODO job could be in an other document
+              extend.range,
+              targetJob.name.range,
+            );
+          }
+        }
+      }
+    }
+    if (this.dependencies?.value.range.contains(operationContext.position)) {
+      for (let dependency of this.dependencies.value.elements) {
+        if (dependency.range.contains(operationContext.position)) {
+          const targetJob = operationContext.context.findJob(dependency.value);
+          if (targetJob) {
+            return makeLocation(
+              operationContext,
+              operationContext.document.uri, // TODO job could be in an other document
+              dependency.range,
+              targetJob.name.range,
+            );
+          }
+        }
+      }
+    }
+    if (this.needs?.range.contains(operationContext.position)) {
+      for (let need of this.needs.value) {
+        if (need.job.range.contains(operationContext.position)) {
+          const targetJob = operationContext.context.findJob(
+            need.job.value.value,
+          );
+          if (targetJob) {
+            return makeLocation(
+              operationContext,
+              operationContext.document.uri, // TODO job could be in an other document
+              need.job.range,
+              targetJob.name.range,
             );
           }
         }

@@ -9,7 +9,7 @@ import {
   YAMLMap,
 } from "yaml";
 import { ErrorReporter } from "./error-reporter";
-import { makeRange } from "./gitlab-builder";
+import { makeItemRange, makeRange } from "./gitlab-builder";
 import {
   ListNode,
   ListTemplateNode,
@@ -18,6 +18,7 @@ import {
   ScalarNode,
 } from "./generic-model";
 import { TemplateParser, TextTemplate } from "./template-parser";
+import { VariableDefinition } from "./gitlab.model";
 
 export interface ListBuilder {
   minItems(count: number): ListBuilder;
@@ -29,10 +30,14 @@ export interface MapBuilder {
   ofItemString<T>(
     fn: (name: ScalarNode, value: ScalarNode) => T,
   ): MapItem<T[]> | null;
+  ofItemTemplate<T>(
+    fn: (name: ScalarNode, value: TextTemplate) => T,
+  ): MapItem<T[]> | null;
 }
 
 export class Builder implements ListBuilder {
   private hasError = false;
+  private sourceRange!: Range;
   private defaultReportRange!: Range;
   private node: ParsedNode | null = null;
   private items: ParsedNode[] = [];
@@ -43,6 +48,7 @@ export class Builder implements ListBuilder {
   constructor(private reporter: ErrorReporter) {}
 
   fromItem(item: Pair<ParsedNode, ParsedNode | null>) {
+    this.sourceRange = makeItemRange(item);
     this.defaultReportRange = makeRange(item.key);
     this.node = item.value;
     this.separatorOffset = findMapItemSeparator(item.srcToken!!.sep)!;
@@ -69,6 +75,7 @@ export class Builder implements ListBuilder {
         this.reporter.reportError(this.defaultReportRange, "value is required");
       } else {
         return new MapItem(
+          this.sourceRange,
           this.keyNode,
           this.separatorOffset,
           new ScalarNode(makeRange(this.node), this.node.value as string),
@@ -89,6 +96,7 @@ export class Builder implements ListBuilder {
         this.reporter.reportError(this.defaultReportRange, "value is required");
       } else {
         return new MapItem(
+          this.sourceRange,
           this.keyNode,
           this.separatorOffset,
           new TemplateParser(
@@ -146,6 +154,7 @@ export class Builder implements ListBuilder {
       }
     });
     return new MapItem(
+      makeRange(this.node!),
       this.keyNode,
       this.separatorOffset,
       new ListNode(makeRange(this.node!!), elements),
@@ -171,6 +180,7 @@ export class Builder implements ListBuilder {
       }
     });
     return new MapItem(
+      makeRange(this.node!),
       this.keyNode,
       this.separatorOffset,
       new ListTemplateNode(makeRange(this.node!!), elements),
@@ -202,7 +212,39 @@ export class Builder implements ListBuilder {
         );
       }
     });
-    return new MapItem(this.keyNode, this.separatorOffset, elements);
+    return new MapItem(
+      this.sourceRange,
+      this.keyNode,
+      this.separatorOffset,
+      elements,
+    );
+  }
+
+  ofItemTemplate<T>(
+    fn: (name: ScalarNode, value: TextTemplate) => T,
+  ): MapItem<T[]> | null {
+    const m = this.node as YAMLMap<ParsedNode, ParsedNode | null>;
+    const elements: T[] = [];
+    m.items.forEach((item) => {
+      if (isScalar(item.key) && isScalar(item.value)) {
+        elements.push(
+          fn(
+            new ScalarNode(makeRange(item.key), item.key.value as string),
+            new TemplateParser(
+              item.value.value as string,
+              makeRange(item.value),
+              this.reporter,
+            ).parse(),
+          ),
+        );
+      }
+    });
+    return new MapItem(
+      makeRange(this.node!),
+      this.keyNode,
+      this.separatorOffset,
+      elements,
+    );
   }
 }
 
