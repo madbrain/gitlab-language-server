@@ -2,11 +2,10 @@
 
 # TODO
 
-- Open Definition for `include::local`
+- Goto Definition for `include::local`
 - expand template with inputs
 - merge includes in root file
-- build variable blocks as TextTemplate
-- Open Definition for variable reference
-- Open Definition for job reference
+- Goto Definition for variable reference -> use stack of definitions
+- includes can references pipeline variables ?
 - parse rule expression
 - handle `!reference` link

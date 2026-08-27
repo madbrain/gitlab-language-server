@@ -72,6 +72,7 @@ export interface PositionProvider {
 
 export class MapItem<T /*extends AstNode*/> {
   constructor(
+    public range: Range,
     public keyNode: ScalarNode,
     public separatorOffset: number,
     public value: T,

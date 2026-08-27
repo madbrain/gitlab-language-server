@@ -97,7 +97,7 @@ export class GitlabFileBuilder {
         gitlabFile.variables = new Builder(this.reporter)
           .fromItem(item)
           .map()
-          .ofItemString((name, value) => new VariableDefinition(name, value));
+          .ofItemTemplate((name, value) => new VariableDefinition(name, value));
       } else if (fieldName === "workflow") {
         gitlabFile.workflow = this.parseWorkflow(item);
       } else if (DEPRECATED_MOVE_TO_DEFAULT.includes(fieldName)) {
@@ -113,7 +113,9 @@ export class GitlabFileBuilder {
         } else {
           const job = this.parseJob(nameNode, item.value);
           if (job) {
-            gitlabFile.addJob(new MapItem(nameNode, separator, job));
+            gitlabFile.addJob(
+              new MapItem(makeItemRange(item), nameNode, separator, job),
+            );
           }
         }
       }
@@ -150,7 +152,7 @@ export class GitlabFileBuilder {
           .required()
           .single();
       } else if (fieldName === "rules") {
-        workflow.rules = this.parseRules(keyNode, separator, item.value);
+        workflow.rules = this.parseRules(item, keyNode, separator, item.value);
       } else {
         this.reporter.reportWarning(
           makeRange(item.key),
@@ -159,6 +161,7 @@ export class GitlabFileBuilder {
       }
     });
     return new MapItem(
+      makeItemRange(item),
       new ScalarNode(makeRange(item.key), (item.key as Scalar).value as string),
       findMapItemSeparator(item.srcToken?.sep)!,
       workflow,
@@ -174,15 +177,21 @@ export class GitlabFileBuilder {
     if (!item.value) {
       this.reporter.reportError(makeRange(item.key), "expecting a value");
     } else if (isScalar(item.value)) {
+      const r = makeRange(item.value);
       const value = new TemplateParser(
         item.value.value as string,
-        makeRange(item.value),
+        r,
         this.reporter,
       ).parse();
 
       // TODO could also be remote depending on the URL, but depends on the evaluation of the template
-      const include = new Include();
-      include.local = new MapItem(nameNode, separator, value);
+      const include = new Include(r);
+      include.local = new MapItem(
+        makeItemRange(item),
+        nameNode,
+        separator,
+        value,
+      );
       includes.push(include);
     } else if (isMap(item.value)) {
       const include = this.parseInclude(item.value);
@@ -199,7 +208,7 @@ export class GitlabFileBuilder {
     } else {
       this.reporter.reportError(makeRange(item.key), "expecting a map or list");
     }
-    return new MapItem(nameNode, separator, includes);
+    return new MapItem(makeItemRange(item), nameNode, separator, includes);
   }
 
   private parseInclude(node: ParsedNode) {
@@ -207,7 +216,7 @@ export class GitlabFileBuilder {
       this.reporter.reportError(makeRange(node), "expecting a map");
       return null;
     }
-    const include = new Include();
+    const include = new Include(makeRange(node));
     node.items.forEach((item) => {
       if (!isScalar(item.key)) {
         this.reporter.reportError(makeRange(item.key), "expecting scalar key");
@@ -260,7 +269,7 @@ export class GitlabFileBuilder {
           .map()
           .ofItemString((name, value) => new InputArgument(name, value));
       } else if (fieldName === "rules") {
-        include.rules = this.parseRules(keyNode, separator, item.value);
+        include.rules = this.parseRules(item, keyNode, separator, item.value);
       } else {
         this.reporter.reportError(
           makeRange(item.key),
@@ -272,6 +281,7 @@ export class GitlabFileBuilder {
   }
 
   private parseRules(
+    item: Pair<ParsedNode, ParsedNode | null>,
     keyNode: ScalarNode,
     separator: number,
     value: ParsedNode | null,
@@ -291,7 +301,7 @@ export class GitlabFileBuilder {
         result.push(rule);
       }
     });
-    return new MapItem(keyNode, separator, result);
+    return new MapItem(makeItemRange(item), keyNode, separator, result);
   }
 
   private parseRule(node: ParsedNode): Rule | null {
@@ -330,7 +340,7 @@ export class GitlabFileBuilder {
         rule.variables = new Builder(this.reporter)
           .fromItem(item)
           .map()
-          .ofItemString((name, value) => new VariableDefinition(name, value));
+          .ofItemTemplate((name, value) => new VariableDefinition(name, value));
       } else {
         this.reporter.reportWarning(
           makeRange(item.key),
@@ -371,7 +381,7 @@ export class GitlabFileBuilder {
       } else if (fieldName === "image") {
         job.image = new Builder(this.reporter).fromItem(item).single();
       } else if (fieldName === "retry") {
-        job.retry = this.parseJobRetry(keyNode, separator, item);
+        job.retry = this.parseJobRetry(item, keyNode, separator);
       } else if (fieldName === "tags") {
         job.tags = new Builder(this.reporter).fromItem(item).list().ofString();
       } else if (fieldName === "script") {
@@ -396,7 +406,7 @@ export class GitlabFileBuilder {
           .singleToList()
           .ofString();
       } else if (fieldName === "needs") {
-        job.needs = this.parseJobNeeds(keyNode, separator, item.value);
+        job.needs = this.parseJobNeeds(item, keyNode, separator, item.value);
       } else if (fieldName === "dependencies") {
         job.dependencies = new Builder(this.reporter)
           .fromItem(item)
@@ -406,9 +416,9 @@ export class GitlabFileBuilder {
         job.variables = new Builder(this.reporter)
           .fromItem(item)
           .map()
-          .ofItemString((name, value) => new VariableDefinition(name, value));
+          .ofItemTemplate((name, value) => new VariableDefinition(name, value));
       } else if (fieldName === "rules") {
-        job.rules = this.parseRules(keyNode, separator, item.value);
+        job.rules = this.parseRules(item, keyNode, separator, item.value);
       } else {
         // this.reporter.reportError(
         //   makeRange(item.key),
@@ -420,6 +430,7 @@ export class GitlabFileBuilder {
   }
 
   private parseJobNeeds(
+    item: Pair<ParsedNode, ParsedNode | null>,
     keyNode: ScalarNode,
     separator: number,
     node: ParsedNode | null,
@@ -428,26 +439,27 @@ export class GitlabFileBuilder {
     if (!isSeq(node)) {
       this.reporter.reportError(keyNode.range, "expecting a list");
     } else {
-      node.items.forEach((item) => {
-        if (isScalar(item)) {
+      node.items.forEach((seqItem) => {
+        if (isScalar(seqItem)) {
           const jobNeed = new JobNeed();
           jobNeed.job = new MapItem(
+            makeRange(seqItem),
             keyNode,
             separator,
-            new ScalarNode(makeRange(item), item.value as string),
+            new ScalarNode(makeRange(seqItem), seqItem.value as string),
           );
           jobNeeds.push(jobNeed);
-        } else if (isMap(item)) {
-          jobNeeds.push(this.parseJobNeed(item));
+        } else if (isMap(seqItem)) {
+          jobNeeds.push(this.parseJobNeed(seqItem));
         } else {
           this.reporter.reportError(
-            makeRange(item),
+            makeRange(seqItem),
             "expecting a job name or map",
           );
         }
       });
     }
-    return new MapItem(keyNode, separator, jobNeeds);
+    return new MapItem(makeItemRange(item), keyNode, separator, jobNeeds);
   }
 
   private parseJobNeed(
@@ -473,9 +485,9 @@ export class GitlabFileBuilder {
   }
 
   private parseJobRetry(
+    retryItem: Pair<ParsedNode, ParsedNode | null>,
     keyNode: ScalarNode,
     separator: number,
-    retryItem: Pair<ParsedNode, ParsedNode | null>,
   ): MapItem<JobRetry> {
     const retry = new JobRetry();
     if (isMap(retryItem.value)) {
@@ -508,7 +520,7 @@ export class GitlabFileBuilder {
     } else {
       retry.max = new Builder(this.reporter).fromItem(retryItem).single();
     }
-    return new MapItem(keyNode, separator, retry);
+    return new MapItem(makeItemRange(retryItem), keyNode, separator, retry);
   }
 
   parseComponentSpecDocument(node: ParsedNode) {
@@ -579,7 +591,9 @@ export class GitlabFileBuilder {
       const separator = findMapItemSeparator(item.srcToken!.sep)!;
       const input = this.parseInput(nameNode, item.value);
       if (input) {
-        componentSpec.inputs.push(new MapItem(nameNode, separator, input));
+        componentSpec.inputs.push(
+          new MapItem(makeItemRange(item), nameNode, separator, input),
+        );
       }
     });
   }
@@ -613,7 +627,7 @@ export class GitlabFileBuilder {
       } else if (fieldName === "type") {
         input.type = new Builder(this.reporter).fromItem(item).single();
       } else if (fieldName === "rules") {
-        input.rules = this.parseRules(keyNode, separator, item.value);
+        input.rules = this.parseRules(item, keyNode, separator, item.value);
       }
     });
     return input;
@@ -622,4 +636,14 @@ export class GitlabFileBuilder {
 
 export function makeRange(node: ParsedNode): Range {
   return new Range(node.range[0], node.range[1]);
+}
+
+export function makeItemRange(
+  item: Pair<ParsedNode, ParsedNode | null>,
+): Range {
+  const keyRange = makeRange(item.key);
+  if (item.value) {
+    return makeRange(item.value).merge(keyRange);
+  }
+  return keyRange;
 }
