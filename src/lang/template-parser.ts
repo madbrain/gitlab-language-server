@@ -100,6 +100,7 @@ export class TemplateParser {
           nameStart = this.index;
           ++this.index;
         } else {
+          // TODO maybe don't report any error
           this.reporter.reportError(
             new Range(
               this.range.start + this.index,

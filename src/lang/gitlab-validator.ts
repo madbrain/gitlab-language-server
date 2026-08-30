@@ -383,10 +383,7 @@ export class GitlabFileValidator {
     // TODO validation can change on context include/workflow/job
     // TODO one of if/changes/exists
     if (rule.if) {
-      this.reporter.reportWarning(
-        rule.if.value.range,
-        `CHECK ${rule.if.value}`,
-      );
+      // TODO validate expression from current context (variables + inputs)
     }
     if (rule.when) {
       const WHEN_VALUES = [

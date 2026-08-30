@@ -18,7 +18,7 @@ import {
   ScalarNode,
 } from "./generic-model";
 import { TemplateParser, TextTemplate } from "./template-parser";
-import { VariableDefinition } from "./gitlab.model";
+import { ErrorExpr, Expression, ExpressionParser } from "./expression-parser";
 
 export interface ListBuilder {
   minItems(count: number): ListBuilder;
@@ -95,13 +95,52 @@ export class Builder implements ListBuilder {
       } else if (this.isRequired && !this.node.value) {
         this.reporter.reportError(this.defaultReportRange, "value is required");
       } else {
+        let range = makeRange(this.node);
+        if (
+          this.node.type === Scalar.QUOTE_SINGLE ||
+          this.node.type === Scalar.QUOTE_DOUBLE
+        ) {
+          range = range.shrink(1);
+        }
         return new MapItem(
           this.sourceRange,
           this.keyNode,
           this.separatorOffset,
           new TemplateParser(
             this.node.value as string,
-            makeRange(this.node),
+            range,
+            this.reporter,
+          ).parse(),
+        );
+      }
+    }
+    return null;
+  }
+
+  singleExpression(): MapItem<Expression> | null {
+    if (!this.hasError) {
+      if (!isScalar(this.node)) {
+        this.reporter.reportError(
+          this.defaultReportRange,
+          "expecting a scalar",
+        );
+      } else if (this.isRequired && !this.node.value) {
+        this.reporter.reportError(this.defaultReportRange, "value is required");
+      } else {
+        let range = makeRange(this.node);
+        if (
+          this.node.type === Scalar.QUOTE_SINGLE ||
+          this.node.type === Scalar.QUOTE_DOUBLE
+        ) {
+          range = range.shrink(1);
+        }
+        return new MapItem(
+          this.sourceRange,
+          this.keyNode,
+          this.separatorOffset,
+          new ExpressionParser(
+            this.node.value as string,
+            range,
             this.reporter,
           ).parse(),
         );

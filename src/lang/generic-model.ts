@@ -33,6 +33,10 @@ export class Range {
     return this.start <= offset && offset < this.end;
   }
 
+  shrink(amount: number): Range {
+    return new Range(this.start + amount, this.end - amount);
+  }
+
   toString() {
     return `[${this.start}:${this.end}]`;
   }

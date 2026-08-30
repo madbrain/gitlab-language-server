@@ -15,6 +15,7 @@ import {
 import { ParsedNode, YAMLMap } from "yaml";
 import { GitlabFileContext } from "./gitlab-validator";
 import { TextTemplate } from "./template-parser";
+import { Expression } from "./expression-parser";
 
 export interface OperationOption {
   definitionLinkSupport?: boolean;
@@ -280,9 +281,11 @@ export class InputArgument {
 }
 
 export class Rule {
-  if: MapItem<ScalarNode> | null = null;
-  changes: MapItem<ScalarNode> | null = null;
-  exists: MapItem<ScalarNode> | null = null;
+  // one of
+  if: MapItem<Expression> | null = null;
+  changes: MapItem<ScalarNode> | null = null; // could be complex array or map
+  exists: MapItem<ScalarNode> | null = null; // could be complex array or map
+
   when: MapItem<ScalarNode> | null = null;
   variables: MapItem<VariableDefinition[]> | null = null;
 }
