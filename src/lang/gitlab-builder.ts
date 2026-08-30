@@ -26,6 +26,7 @@ import {
 import { MapItem, Range, ScalarNode } from "./generic-model";
 import { Builder, findMapItemSeparator } from "./generic-builder";
 import { TemplateParser } from "./template-parser";
+import { ExpressionParser } from "./expression-parser";
 
 export interface ParsedGitlabFile {
   uri: string;
@@ -326,7 +327,7 @@ export class GitlabFileBuilder {
       }
       const fieldName = item.key.value as string;
       if (fieldName === "if") {
-        rule.if = new Builder(this.reporter).fromItem(item).required().single();
+        rule.if = new Builder(this.reporter).fromItem(item).required().singleExpression();
       } else if (fieldName === "changes") {
         this.reporter.reportWarning(makeRange(item.key), "TODO");
       } else if (fieldName === "exists") {
