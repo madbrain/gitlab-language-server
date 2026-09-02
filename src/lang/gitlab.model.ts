@@ -242,6 +242,19 @@ export class Include {
         this.context.spec?.range ?? InternalRange.NULL,
       );
     }
+    if (
+      this.local &&
+      this.local.value.range.contains(operationContext.position) &&
+      this.context
+    ) {
+      const sourceRange = this.local.value.range;
+      return makeLocation(
+        operationContext,
+        this.context.uri,
+        sourceRange,
+        this.context.spec?.range ?? InternalRange.NULL,
+      );
+    }
     // TODO inputs
     // TODO find the correct input field following path and search into this.context.spec
     return [];
