@@ -365,10 +365,11 @@ export class GitlabFileValidator {
       );
       return;
     }
+    include.context = includedGitlabFile;
 
     // TODO validate inputs if present
     this.reporter.reportWarning(
-      local.keyNode.range,
+      local.value.range,
       `TODO ${includedGitlabFile.uri}`,
     );
   }
