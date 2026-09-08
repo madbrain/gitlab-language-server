@@ -3,6 +3,9 @@ import * as fs from "fs";
 import * as path from "path";
 import { createHash } from "crypto";
 import { LocalFile, MyConsole } from "./gitlabci";
+import { SettingsProvider } from "./gitlab-validator";
+import fetch from "node-fetch";
+import https from "https";
 
 const MIN_CACHE_CHECK_MIN = 5;
 
@@ -13,10 +16,20 @@ export class GitlabRemoteCache {
   constructor(
     private cacheDir: string,
     gitlabRemoteURL: string,
+    private settingsProvider: SettingsProvider,
     private console: MyConsole,
   ) {
     this.gitlabAPIURL = URI.parse(gitlabRemoteURL).with({ path: "api/v4" });
     fs.mkdirSync(cacheDir, { recursive: true });
+  }
+
+  private async getHttpConfig() {
+     const headers: HeadersInit = {};
+    const token = await this.settingsProvider.getToken();
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    return { headers, agent: new https.Agent({ rejectUnauthorized: false }) };
   }
 
   private async getProjectId(projectPath: string) {
@@ -25,13 +38,17 @@ export class GitlabRemoteCache {
       return projectId;
     }
     const url = `${this.gitlabAPIURL}/projects/${encodeURIComponent(projectPath)}`;
+    const config = await this.getHttpConfig();
     this.console.log(`FETCH PROJECT INFO ${url}`);
-    return await fetch(url)
+    return fetch(url, config)
       .then((r) => r.json())
       .then((r) => {
-        const projectId = r.id;
+        const projectId = (r as any).id;
         this.projectIdCache.set(projectPath, projectId);
         return projectId;
+      })
+      .catch(e => {
+        this.console.log(`ERROR ${e}`)
       });
   }
 
@@ -48,17 +65,21 @@ export class GitlabRemoteCache {
       ref,
       filePath,
     );
-    const url = `${this.gitlabAPIURL}/projects/${projectId}/repository/files/${encodeURIComponent(filePath)}?ref=${ref}`;
+    const normalizedPath = filePath.replace(/^\/+/, '');
+    const url = `${this.gitlabAPIURL}/projects/${projectId}/repository/files/${encodeURIComponent(normalizedPath)}?ref=${ref}`;
 
     const fetchAndStore = () => {
       this.console.log(`FETCH ${url}`);
-      return fetch(url)
-        .then((r) => r.json())
-        .then((r) => {
-          const buffer = Buffer.from(r.content, r.encoding);
-          fs.mkdirSync(path.dirname(localPath), { recursive: true });
-          fs.writeFileSync(localPath, buffer);
-          return { path: localPath, content: buffer.toString("utf-8") };
+      return this.getHttpConfig()
+        .then(config => {
+          return fetch(url, config)
+            .then((r) => r.json())
+            .then((r) => {
+              const buffer = Buffer.from((r as any).content, (r as any).encoding);
+              fs.mkdirSync(path.dirname(localPath), { recursive: true });
+              fs.writeFileSync(localPath, buffer);
+              return { path: localPath, content: buffer.toString("utf-8") };
+            });
         });
     };
 

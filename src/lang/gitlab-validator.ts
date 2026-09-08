@@ -12,9 +12,8 @@ import { GitlabService, LocalFile } from "./gitlabci";
 import { ParsedNode } from "yaml";
 import * as path from "path";
 import { ParsedGitlabFile } from "./gitlab-builder";
-import { expandText } from "./variable-expander";
 import { URI } from "vscode-uri";
-import { TemplateParser, TextTemplate } from "./template-parser";
+import { TextTemplate } from "./template-parser";
 
 export class GitlabFileContext {
   stages = DEFAULT_STAGES;
@@ -74,7 +73,8 @@ export interface IncludeResolver {
   ): Promise<LocalFile | null>;
 }
 
-export interface VariablesProvider {
+export interface SettingsProvider {
+  getToken(): Promise<string | null>;
   getProjectVariables(): Promise<{ [name: string]: string }>;
 }
 
@@ -82,7 +82,7 @@ export class GitlabFileValidator {
   constructor(
     private reporter: ErrorReporter,
     private includeResolver: IncludeResolver,
-    private variablesProvider: VariablesProvider,
+    private variablesProvider: SettingsProvider,
     private gitlabService: GitlabService,
   ) {}
 

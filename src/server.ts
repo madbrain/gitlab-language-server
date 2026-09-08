@@ -25,7 +25,7 @@ import { CompletionPositioner } from "./lang/completion-positioner";
 import { GenericTextDocument } from "./lang/text-document";
 import { DefaultIncludeResolver, GitlabService } from "./lang/gitlabci";
 import { OperationOption } from "./lang/gitlab.model";
-import { VariablesProvider } from "./lang/gitlab-validator";
+import { SettingsProvider } from "./lang/gitlab-validator";
 import { expandVariables } from "./lang/variable-expander";
 
 let connection: Connection =
@@ -44,7 +44,19 @@ documents.listen(connection);
 const logConsole = {
   log: (msg: string) => connection.console.log(msg),
 };
-const variablesProvider: VariablesProvider = {
+const settingsProvider: SettingsProvider = {
+
+  getToken() {
+    return connection.workspace
+      .getConfiguration("gitlabci-language-server")
+      .then((settings) => {
+        if (!settings) {
+          return null;
+        }
+        return (settings as GitlabCISettings).project.token;
+      });
+  },
+
   getProjectVariables() {
     // TODO add predefined variables -> may depend on workspace configuration
     return connection.workspace
@@ -60,8 +72,8 @@ const variablesProvider: VariablesProvider = {
       });
   },
 };
-const includeResolver = new DefaultIncludeResolver(logConsole);
-const gitlabService = new GitlabService(includeResolver, variablesProvider);
+const includeResolver = new DefaultIncludeResolver(logConsole, settingsProvider);
+const gitlabService = new GitlabService(includeResolver, settingsProvider);
 const gitlabDocumentCache = new GitlabDocumentCache(gitlabService);
 const validationDebouncer = new ValidationDebouncer(500, validateTextDocument);
 const options: OperationOption = {};
@@ -127,6 +139,7 @@ connection.onInitialized(() => {
 
 interface GitlabCISettings {
   project: {
+    token: string;
     variables: { [variable: string]: string };
   };
 }

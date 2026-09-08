@@ -21,6 +21,7 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
+    "node-fetch": "^3.3.2",
     "parse-git-config": "^3.0.0",
     "vscode-languageserver": "^8.1.0",
     "vscode-languageserver-textdocument": "^1.0.8",

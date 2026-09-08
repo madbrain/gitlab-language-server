@@ -10,7 +10,7 @@ import {
   GitlabFileContext,
   GitlabFileValidator,
   IncludeResolver,
-  VariablesProvider,
+  SettingsProvider,
 } from "./gitlab-validator";
 import { GitlabRemoteCache } from "./gitlab-remote-cache";
 
@@ -27,7 +27,7 @@ export class DefaultIncludeResolver implements IncludeResolver {
   private gitlabRemoteCache: GitlabRemoteCache | null = null;
   private workspacesUri: string[] = [];
 
-  constructor(private console: MyConsole) {}
+  constructor(private console: MyConsole, private settingsProvider: SettingsProvider) {}
 
   setWorkspaces(workspacesUri: string[]) {
     // TODO move local git config resolution to other service
@@ -70,6 +70,7 @@ export class DefaultIncludeResolver implements IncludeResolver {
       this.gitlabRemoteCache = new GitlabRemoteCache(
         cacheDir,
         workspaceInfo.gitlabRemoteUrl,
+        this.settingsProvider,
         this.console,
       );
     }
@@ -127,7 +128,7 @@ export class DefaultIncludeResolver implements IncludeResolver {
 export class GitlabService {
   constructor(
     private includeResolver: IncludeResolver,
-    private variablesProvider: VariablesProvider,
+    private settingsProvider: SettingsProvider,
   ) {}
 
   private parseDocuments(text: string, reporter: ErrorReporter) {
@@ -174,7 +175,7 @@ export class GitlabService {
         return await new GitlabFileValidator(
           reporter,
           this.includeResolver,
-          this.variablesProvider,
+          this.settingsProvider,
           this,
         ).validate(parsedFile, spec);
       }
